@@ -6,6 +6,8 @@ pub mod utils {
 
 pub mod queues {
     pub mod lfqueue;
+    pub mod queues;
+    pub mod mqueue;
 }
 
 #[cfg(test)]

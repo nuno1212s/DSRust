@@ -2,57 +2,9 @@ use std::cell::{Cell, RefCell, UnsafeCell};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+use crate::queues::queues::{BQueue, Queue, QueueError, SizableQueue};
 use crate::utils::backoff::{Backoff, Rooms};
-
-trait SizableQueue {
-    fn size(&self) -> u32;
-}
-
-/// FIFO blocking queue trait
-trait BQueue<T>: SizableQueue {
-    ///Enqueue an element into the tail of the queue
-    /// Will block if there is no available space in the queue
-    fn enqueue_blk(&self, elem: T);
-
-    ///Pop the first element in the queue
-    /// Will block if the queue is empty until there is an element
-    fn pop_blk(&self) -> T;
-
-    /// Dump the first count elements from the queue
-    /// If the queue has less than count elements it will block until
-    /// it has finished getting all the elements
-    fn dump_blk(&self, count: u32) -> Vec<T>;
-}
-
-///FIFO non blocking queue trait
-trait Queue<T>: SizableQueue {
-    ///Attempts to enqueue an element at the tail of the queue
-    /// If the queue is already full and does not support any more elements,
-    /// the function will not block
-    fn enqueue(&self, elem: T) -> Result<(), QueueError>;
-
-    ///Attempt to pop the first element in the queue
-    /// Will not block if the queue is empty
-    fn pop(&self) -> Option<T>;
-
-    /// Dump the first count elements from the queue
-    /// If the queue has less than count elements it will return as many
-    /// elements as currently available
-    fn dump(&self, count: u32) -> Vec<T>;
-}
-
-#[derive(Debug)]
-enum QueueError {
-    QueueFull
-}
-
-impl Error for QueueError {}
-
-impl Display for QueueError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Failed to add element, queue is already full")
-    }
-}
 
 const SIZE_ROOM: i32 = 1;
 const ADD_ROOM: i32 = 2;
@@ -142,6 +94,8 @@ impl<T> Queue<T> for LFQueue<T> {
     }
 
     fn pop(&self) -> Option<T> {
+        let t: T;
+
         self.rooms.enter(REM_ROOM);
 
         let prev_head = self.head.fetch_add(1, Ordering::SeqCst);
@@ -287,8 +241,58 @@ impl<T> BQueue<T> for LFQueue<T> {
         return t;
     }
 
-    fn dump_blk(&self, count: u32) -> Vec<T> {
-        todo!()
+    fn dump_blk(&self, count: usize) -> Vec<T> {
+        ///Pre allocate the vector to limit to the max the
+        /// amount of time we will spend in the critical section
+        let mut new_vec = Vec::with_capacity(count);
+
+        let mut left_to_collect = count as i32;
+
+        loop {
+            self.rooms.enter(REM_ROOM);
+
+            let mut last_element = self.tail.load(Ordering::SeqCst);
+
+            let prev_head = self.head.swap(last_element, Ordering::SeqCst);
+
+            let mut count = last_element - prev_head;
+
+            if count > 0 {
+
+                if count > left_to_collect as u32 {
+                    let excess = count - left_to_collect as u32;
+
+                    //rewind the uncollected
+                    self.head.fetch_sub(excess, Ordering::SeqCst);
+
+                    last_element -= excess;
+
+                    count = left_to_collect as u32;
+                }
+
+                left_to_collect -= count as i32;
+
+                unsafe {
+                    let x = &mut *self.array.get();
+
+                    //Move the values into the new vector
+                    for pos in prev_head..last_element {
+                        new_vec.push(x.remove(pos as usize));
+                    }
+                }
+            }
+
+            self.rooms.leave(REM_ROOM);
+
+            if left_to_collect <= 0 {
+
+                Backoff::reset();
+
+                return new_vec;
+            }
+
+            Backoff::backoff();
+        }
     }
 }
 
