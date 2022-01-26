@@ -126,8 +126,8 @@ impl<T> Queue<T> for LFQueue<T> {
     }
 
     fn dump(&self, count: usize) -> Vec<T> {
-        ///Pre allocate the vector to limit to the max the
-        /// amount of time we will spend in the critical section
+        //Pre allocate the vector to limit to the max the
+        //amount of time we will spend in the critical section
         let mut new_vec = Vec::with_capacity(count);
 
         loop {
@@ -178,7 +178,7 @@ impl<T> BQueue<T> for LFQueue<T> {
                 unsafe {
                     let array_mut = &mut *self.array.get();
 
-                    array_mut.insert((prev_tail as usize % self.capacity()), elem);
+                    array_mut.insert(prev_tail as usize % self.capacity(), elem);
                 }
 
                 //In case the element we have inserted is the last one,

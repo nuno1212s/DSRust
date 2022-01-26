@@ -1,13 +1,14 @@
-use std::sync::{Mutex, TryLockResult};
+use std::sync::{Condvar, Mutex, TryLockResult};
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU32, Ordering};
 
-use crate::queues::queues::{Queue, QueueError, SizableQueue};
+use crate::queues::queues::{BQueue, Queue, QueueError, SizableQueue};
 use crate::utils::backoff::Backoff;
 
 pub struct MQueue<T> {
     capacity: usize,
     size: AtomicI64,
-    array: Mutex<(Vec<T>, u32)>,
+    array: Mutex<(Vec<T>, i64)>,
+    lock_notifier: Condvar,
     backoff: bool,
 }
 
@@ -17,6 +18,7 @@ impl<T> MQueue<T> {
             capacity,
             size: AtomicI64::new(0),
             array: Mutex::new((Vec::with_capacity(capacity), 0)),
+            lock_notifier: Condvar::new(),
             backoff: use_backoff,
         }
     }
@@ -42,7 +44,10 @@ impl<T> Queue<T> for MQueue<T> {
                 let lock_res = self.array.try_lock();
 
                 match lock_res {
-                    Ok(lock_guard) => {
+                    Ok(mut lock_guard) => {
+                        //We increment and then decrement in case it overflows because most of the time we
+                        //Assume the operation is going to be completed successfully, so
+                        //The size will not need to be decremented, so a single item is fine
                         let size = self.size.fetch_add(1, Ordering::SeqCst);
 
                         if size >= self.capacity() as i64 {
@@ -53,12 +58,16 @@ impl<T> Queue<T> for MQueue<T> {
                             return Err(QueueError::QueueFull);
                         }
 
-                        lock_guard.0.insert((lock_guard.1 + size) % self.capacity(),
-                                            elem);
+                        let head = lock_guard.1;
+
+                        let mut vector = &mut lock_guard.0;
+
+                        vector.insert(((head + size) as usize % self.capacity()),
+                                      elem);
 
                         break;
                     }
-                    Err(Err) => {}
+                    Err(er) => {}
                 }
 
                 Backoff::backoff();
@@ -68,6 +77,12 @@ impl<T> Queue<T> for MQueue<T> {
 
             Ok(())
         } else {
+            let mut lock_guard = self.array.lock().unwrap();
+
+            //Attempt to reserve the slot in the size.
+            //We increment and then decrement in case it overflows because most of the time we
+            //Assume the operation is going to be completed successfully, so
+            //The size will not need to be decremented, so a single item is fine
             let size = self.size.fetch_add(1, Ordering::SeqCst);
 
             if size >= self.capacity() as i64 {
@@ -76,9 +91,9 @@ impl<T> Queue<T> for MQueue<T> {
                 return Err(QueueError::QueueFull);
             }
 
-            let lock_guard = self.array.lock().unwrap();
+            let head = lock_guard.1;
 
-            lock_guard.0.insert((size + lock_guard.1) % self.capacity(), elem);
+            (&mut lock_guard.0).insert((size + head) as usize % self.capacity(), elem);
 
             Ok(())
         }
@@ -87,10 +102,14 @@ impl<T> Queue<T> for MQueue<T> {
     fn pop(&self) -> Option<T> {
         if self.backoff() {
             loop {
-                let lock_result = self.array.try_lock();
+                let mut lock_result = self.array.try_lock();
 
                 match lock_result {
-                    Ok(lock_guard) => {
+                    Ok(mut lock_guard) => {
+
+                        //We increment and then decrement in case it overflows because most of the time we
+                        //Assume the operation is going to be completed successfully, so
+                        //The size will not need to be decremented, so a single item is fine
                         let size = self.size.fetch_sub(1, Ordering::SeqCst);
 
                         if size <= 0 {
@@ -103,9 +122,9 @@ impl<T> Queue<T> for MQueue<T> {
 
                         let head = lock_guard.1;
 
-                        *lock_guard.1 = (head + 1) % self.capacity();
+                        lock_guard.1 = (head + 1) % self.capacity() as i64;
 
-                        let elem = lock_guard.0.remove((head + size) % self.capacity());
+                        let elem = lock_guard.0.remove((head + size) as usize % self.capacity());
 
                         drop(lock_guard);
 
@@ -119,8 +138,11 @@ impl<T> Queue<T> for MQueue<T> {
                 Backoff::backoff();
             }
         } else {
-            let lock_guard = self.array.lock().unwrap();
+            let mut lock_guard = self.array.lock().unwrap();
 
+            //We increment and then decrement in case it overflows because most of the time we
+            //Assume the operation is going to be completed successfully, so
+            //The size will not need to be decremented, so a single item is fine
             let size = self.size.fetch_sub(1, Ordering::SeqCst);
 
             if size <= 0 {
@@ -131,11 +153,9 @@ impl<T> Queue<T> for MQueue<T> {
 
             let head = lock_guard.1;
 
-            *lock_guard.1 = (head + 1) % self.capacity();
+            lock_guard.1 = (head + 1) % self.capacity() as i64;
 
-            lock_guard.0.remove((head + size) % self.capacity());
-
-            None
+            Some(lock_guard.0.remove((head + size) as usize % self.capacity()))
         }
     }
 
@@ -151,20 +171,20 @@ impl<T> Queue<T> for MQueue<T> {
                         return vec;
                     }
 
-                    let array = &mut lock_guard.0;
-
                     let mut head = lock_guard.1;
 
-                    let mut current_size: i64 = self.size.fetch_sub(1, Ordering::Relaxed) ;
+                    let array = &mut lock_guard.0;
+
+                    let mut current_size: i64 = self.size.fetch_sub(1, Ordering::Relaxed);
 
                     loop {
-                        vec.push(array.remove((head + current_size) % self.capacity()));
+                        vec.push(array.remove((head + current_size) as usize % self.capacity()));
 
-                        head = (head + 1) % self.capacity();
+                        head = (head + 1) % self.capacity() as i64;
                         current_size = self.size.fetch_sub(1, Ordering::Relaxed);
 
                         if current_size <= 1 {
-                            break
+                            break;
                         }
                     }
 
@@ -177,5 +197,129 @@ impl<T> Queue<T> for MQueue<T> {
         }
 
         Vec::new()
+    }
+}
+
+impl<T> BQueue<T> for MQueue<T> {
+    fn enqueue_blk(&self, elem: T) {
+        if self.backoff() {
+            loop {
+                let mut lock_res = self.array.try_lock();
+
+                match lock_res {
+                    Ok(mut lock_guard) => {
+                        let size = self.size.fetch_add(1, Ordering::SeqCst);
+
+                        if size >= self.capacity() as i64 {
+                            self.size.fetch_sub(1, Ordering::Relaxed);
+
+                            Backoff::backoff();
+
+                            continue;
+                        }
+
+                        let head = lock_guard.1;
+
+                        lock_guard.0.insert(((head + size) as usize % self.capacity()),
+                                            elem);
+
+                        break;
+                    }
+                    Err(er) => {}
+                }
+
+                Backoff::backoff();
+            }
+
+            Backoff::reset();
+        } else {
+            let mut lock_guard = self.array.lock().unwrap();
+
+            let mut size = self.size.fetch_add(1, Ordering::Relaxed);
+
+            while size >= self.capacity() as i64 {
+                self.size.fetch_sub(1, Ordering::Relaxed);
+
+                lock_guard = self.lock_notifier.wait(lock_guard).unwrap();
+
+                size = self.size.fetch_add(1, Ordering::Relaxed);
+            }
+
+            let head = lock_guard.1;
+
+            (&mut lock_guard.0).insert((size + head) as usize % self.capacity(), elem);
+
+            //Notify the threads that are waiting for the notification to pop an item
+            //We notify_all because since the OS is not deterministic and if it only wakes up a thread
+            //That is waiting for space to enqueue we will be here forever
+            self.lock_notifier.notify_all();
+        }
+    }
+
+    fn pop_blk(&self) -> T {
+        if self.backoff() {
+            loop {
+                let mut lock_result = self.array.try_lock();
+
+                match lock_result {
+                    Ok(mut lock_guard) => {
+
+                        //We increment and then decrement in case it overflows because most of the time we
+                        //Assume the operation is going to be completed successfully, so
+                        //The size will not need to be decremented, so a single item is fine
+                        let size = self.size.fetch_sub(1, Ordering::SeqCst);
+
+                        if size <= 0 {
+                            self.size.fetch_add(1, Ordering::Relaxed);
+
+                            Backoff::backoff();
+
+                            continue;
+                        }
+
+                        let head = lock_guard.1;
+
+                        lock_guard.1 = (head + 1) % self.capacity() as i64;
+
+                        let elem = lock_guard.0.remove((head + size) as usize % self.capacity());
+
+                        drop(lock_guard);
+
+                        Backoff::reset();
+
+                        return elem;
+                    }
+
+                    Err(er) => {}
+                }
+
+                Backoff::backoff();
+            }
+        } else {
+            let mut lock_guard = self.array.lock().unwrap();
+
+            //We increment and then decrement in case it overflows because most of the time we
+            //Assume the operation is going to be completed successfully, so
+            //The size will not need to be decremented, so a single item is fine
+            let mut size = self.size.fetch_sub(1, Ordering::Relaxed);
+
+            while size <= 0 {
+                self.size.fetch_add(1, Ordering::Relaxed);
+
+                lock_guard = self.lock_notifier.wait(lock_guard).unwrap();
+
+                size = self.size.fetch_sub(1, Ordering::Relaxed);
+            }
+
+            let head = lock_guard.1;
+
+            lock_guard.1 = (head + 1) % self.capacity() as i64;
+
+            lock_guard.0.remove((head + size) as usize % self.capacity())
+        }
+    }
+
+    fn dump_blk(&self, count: usize) -> Vec<T> {
+        todo!()
     }
 }
