@@ -1,5 +1,5 @@
 use std::sync::{Condvar, Mutex, TryLockResult};
-use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use crate::queues::queues::{BQueue, Queue, QueueError, SizableQueue};
 use crate::utils::backoff::Backoff;
@@ -62,12 +62,12 @@ impl<T> Queue<T> for MQueue<T> {
 
                         let mut vector = &mut lock_guard.0;
 
-                        vector.insert(((head + size) as usize % self.capacity()),
+                        vector.insert((head + size) as usize % self.capacity(),
                                       elem);
 
                         break;
                     }
-                    Err(er) => {}
+                    Err(_er) => {}
                 }
 
                 Backoff::backoff();
@@ -132,7 +132,7 @@ impl<T> Queue<T> for MQueue<T> {
 
                         return Some(elem);
                     }
-                    Err(er) => {}
+                    Err(_er) => {}
                 }
 
                 Backoff::backoff();
@@ -225,7 +225,7 @@ impl<T> BQueue<T> for MQueue<T> {
 
                         break;
                     }
-                    Err(er) => {}
+                    Err(_er) => {}
                 }
 
                 Backoff::backoff();
@@ -290,7 +290,7 @@ impl<T> BQueue<T> for MQueue<T> {
                         return elem;
                     }
 
-                    Err(er) => {}
+                    Err(_er) => {}
                 }
 
                 Backoff::backoff();
@@ -315,7 +315,11 @@ impl<T> BQueue<T> for MQueue<T> {
 
             lock_guard.1 = (head + 1) % self.capacity() as i64;
 
-            lock_guard.0.remove((head + size) as usize % self.capacity())
+            let result = lock_guard.0.remove((head + size) as usize % self.capacity());
+
+            self.lock_notifier.notify_all();
+
+            result
         }
     }
 

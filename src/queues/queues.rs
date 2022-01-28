@@ -1,6 +1,8 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
+
+
 pub trait SizableQueue {
     fn size(&self) -> u32;
 }
@@ -48,5 +50,88 @@ impl Error for QueueError {}
 impl Display for QueueError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "Failed to add element, queue is already full")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::queues::lfqueue::LFQueue;
+    use crate::queues::mqueue::MQueue;
+    use crate::queues::queues::Queue;
+
+    fn test_single_thread_ordering_for<T>(queue: T, count: u32) where T: Queue<u32> {
+        for i in 0..count {
+            queue.enqueue(i).unwrap();
+        }
+
+        let mut current: u32 = 0;
+
+        while queue.size() > 0 {
+            let option = queue.pop();
+
+            assert!(option.is_some());
+
+            assert_eq!(option.unwrap(), current);
+
+            current += 1;
+        }
+
+        assert_eq!(current, count);
+    }
+
+    fn test_single_thread_capacity_for<T>(queue: T, count: u32) where T: Queue<u32> {
+
+        for i in 0..count {
+            queue.enqueue(i).unwrap();
+        }
+
+        //Should not be able to insert
+        assert!(queue.enqueue(count).is_err());
+
+        let popped = queue.pop();
+
+        let mut current = 0;
+
+        assert!(popped.is_some() && popped.unwrap() == current);
+
+        current += 1;
+
+        assert!(queue.enqueue(count).is_ok());
+
+        while queue.size() > 0 {
+            let option = queue.pop();
+
+            assert!(option.is_some());
+
+            assert_eq!(option.unwrap(), current);
+
+            current += 1;
+        }
+
+        assert_eq!(current, count + 1);
+    }
+
+    #[test]
+    fn test_single_thread_ordering() {
+
+        let limit = 10;
+
+        test_single_thread_ordering_for(MQueue::new(limit, true), limit as u32);
+
+        test_single_thread_ordering_for(MQueue::new(limit, false), limit as u32);
+
+        test_single_thread_ordering_for(LFQueue::new(limit), limit as u32);
+    }
+
+    #[test]
+    fn test_single_thread_capacity() {
+
+        let limit = 10;
+
+        test_single_thread_capacity_for(MQueue::new(limit, true), limit as u32);
+
+        test_single_thread_capacity_for(MQueue::new(limit, false), limit as u32);
+
+        test_single_thread_capacity_for(LFQueue::new(limit), limit as u32);
     }
 }

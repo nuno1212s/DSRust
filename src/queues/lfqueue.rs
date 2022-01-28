@@ -1,6 +1,4 @@
-use std::cell::{Cell, RefCell, UnsafeCell};
-use std::error::Error;
-use std::fmt::{Display, Formatter};
+use std::cell::{UnsafeCell};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::queues::queues::{BQueue, Queue, QueueError, SizableQueue};
@@ -14,7 +12,7 @@ const REM_ROOM: i32 = 3;
 ///Working with many concurrent threads
 ///TODO: Fix the issue that is caused by the head and tail being strictly ascending
 ///Therefore we will reach a point of overflow with continued use.
-struct LFQueue<T> {
+pub struct LFQueue<T> {
     array: UnsafeCell<Vec<T>>,
     head: AtomicU32,
     tail: AtomicU32,
@@ -42,11 +40,11 @@ impl<T> LFQueue<T> {
 
 impl<T> SizableQueue for LFQueue<T> {
     fn size(&self) -> u32 {
-        self.rooms.enter(SIZE_ROOM);
+        self.rooms.enter_blk(SIZE_ROOM);
 
         let size = self.tail.load(Ordering::SeqCst) - self.head.load(Ordering::SeqCst);
 
-        self.rooms.leave(SIZE_ROOM);
+        self.rooms.leave_blk(SIZE_ROOM);
 
         size
     }
@@ -61,7 +59,7 @@ impl<T> Queue<T> for LFQueue<T> {
             return Result::Err(QueueError::QueueFull);
         }
 
-        self.rooms.enter(ADD_ROOM);
+        self.rooms.enter_blk(ADD_ROOM);
 
         let prev_tail = self.tail.fetch_add(1, Ordering::SeqCst);
 
@@ -71,7 +69,7 @@ impl<T> Queue<T> for LFQueue<T> {
             unsafe {
                 let array_mut = &mut *self.array.get();
 
-                array_mut.insert((prev_tail as usize % self.capacity()), elem);
+                array_mut.insert(prev_tail as usize % self.capacity(), elem);
             }
 
             //In case the element we have inserted is the last one,
@@ -80,7 +78,7 @@ impl<T> Queue<T> for LFQueue<T> {
                 self.is_full.store(true, Ordering::Relaxed);
             }
 
-            self.rooms.leave(ADD_ROOM);
+            self.rooms.leave_blk(ADD_ROOM);
 
             return Result::Ok(());
         }
@@ -88,7 +86,7 @@ impl<T> Queue<T> for LFQueue<T> {
 
         self.tail.fetch_sub(1, Ordering::SeqCst);
 
-        self.rooms.leave(ADD_ROOM);
+        self.rooms.leave_blk(ADD_ROOM);
 
         Err(QueueError::QueueFull)
     }
@@ -96,7 +94,7 @@ impl<T> Queue<T> for LFQueue<T> {
     fn pop(&self) -> Option<T> {
         let t: T;
 
-        self.rooms.enter(REM_ROOM);
+        self.rooms.enter_blk(REM_ROOM);
 
         let prev_head = self.head.fetch_add(1, Ordering::SeqCst);
 
@@ -113,13 +111,13 @@ impl<T> Queue<T> for LFQueue<T> {
                 self.is_full.store(false, Ordering::Relaxed);
             }
 
-            self.rooms.leave(REM_ROOM);
+            self.rooms.leave_blk(REM_ROOM);
 
             Some(t)
         } else {
             self.head.fetch_sub(1, Ordering::Relaxed);
 
-            self.rooms.leave(REM_ROOM);
+            self.rooms.leave_blk(REM_ROOM);
 
             None
         }
@@ -131,7 +129,7 @@ impl<T> Queue<T> for LFQueue<T> {
         let mut new_vec = Vec::with_capacity(count);
 
         loop {
-            self.rooms.enter(REM_ROOM);
+            self.rooms.enter_blk(REM_ROOM);
 
             let current_tail = self.tail.load(Ordering::SeqCst);
 
@@ -150,7 +148,7 @@ impl<T> Queue<T> for LFQueue<T> {
                 }
             }
 
-            self.rooms.leave(REM_ROOM);
+            self.rooms.leave_blk(REM_ROOM);
 
             return new_vec;
         }
@@ -168,7 +166,7 @@ impl<T> BQueue<T> for LFQueue<T> {
                 continue;
             }
 
-            self.rooms.enter(ADD_ROOM);
+            self.rooms.enter_blk(ADD_ROOM);
 
             let prev_tail = self.tail.fetch_add(1, Ordering::SeqCst);
 
@@ -193,13 +191,13 @@ impl<T> BQueue<T> for LFQueue<T> {
             {
                 self.tail.fetch_sub(1, Ordering::SeqCst);
 
-                self.rooms.leave(ADD_ROOM);
+                self.rooms.leave_blk(ADD_ROOM);
 
                 Backoff::backoff();
             }
         }
 
-        self.rooms.leave(ADD_ROOM);
+        self.rooms.leave_blk(ADD_ROOM);
         Backoff::reset();
     }
 
@@ -207,7 +205,7 @@ impl<T> BQueue<T> for LFQueue<T> {
         let t: T;
 
         loop {
-            self.rooms.enter(REM_ROOM);
+            self.rooms.enter_blk(REM_ROOM);
 
             let prev_head = self.head.fetch_add(1, Ordering::SeqCst);
 
@@ -224,13 +222,13 @@ impl<T> BQueue<T> for LFQueue<T> {
                     self.is_full.store(false, Ordering::Relaxed);
                 }
 
-                self.rooms.leave(REM_ROOM);
+                self.rooms.leave_blk(REM_ROOM);
 
                 break;
             } else {
                 self.head.fetch_sub(1, Ordering::Relaxed);
 
-                self.rooms.leave(REM_ROOM);
+                self.rooms.leave_blk(REM_ROOM);
 
                 Backoff::backoff();
             }
@@ -242,14 +240,14 @@ impl<T> BQueue<T> for LFQueue<T> {
     }
 
     fn dump_blk(&self, count: usize) -> Vec<T> {
-        ///Pre allocate the vector to limit to the max the
-        /// amount of time we will spend in the critical section
+        //Pre allocate the vector to limit to the max the
+        //amount of time we will spend in the critical section
         let mut new_vec = Vec::with_capacity(count);
 
         let mut left_to_collect = count as i32;
 
         loop {
-            self.rooms.enter(REM_ROOM);
+            self.rooms.enter_blk(REM_ROOM);
 
             let mut last_element = self.tail.load(Ordering::SeqCst);
 
@@ -282,7 +280,7 @@ impl<T> BQueue<T> for LFQueue<T> {
                 }
             }
 
-            self.rooms.leave(REM_ROOM);
+            self.rooms.leave_blk(REM_ROOM);
 
             if left_to_collect <= 0 {
 

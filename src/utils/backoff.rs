@@ -1,14 +1,11 @@
-use std::borrow::BorrowMut;
 use std::cell::Cell;
-use std::{alloc, mem};
 use std::error::Error;
-use std::fmt::{Display, Formatter, write};
-use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
-use std::sync::{Mutex, TryLockResult};
+use std::fmt::{Display, Formatter};
+use std::ops::Deref;
+use std::sync::{Mutex, MutexGuard, TryLockResult};
 use std::thread::sleep;
 use std::time::Duration;
-use std::u64::MAX;
+
 use rand::RngCore;
 
 thread_local! {
@@ -76,30 +73,34 @@ impl State {
         }
     }
 
-    pub fn enter(self) -> Self {
+    pub fn enter(mut self, room_nr: i32) -> Self {
         match self {
             State::FREE => {
-                self
+                State::OCCUPIED {
+                    currently_inside: 1,
+                    room_nr,
+                }
             }
-            State::OCCUPIED { mut currently_inside, .. } => {
-                currently_inside += 1;
+            State::OCCUPIED { ref mut currently_inside, room_nr } => {
+                *currently_inside += 1;
 
                 self
             }
         }
     }
 
-    pub fn leave(self) -> Self {
+    pub fn leave(mut self, _room_nr: i32) -> Self {
         match self {
             State::FREE => {
                 self
             }
-            State::OCCUPIED { mut currently_inside, .. } => {
-                if currently_inside <= 1 {
+            State::OCCUPIED { ref mut currently_inside, room_nr } => {
+                if *currently_inside <= 1 {
                     return State::FREE;
                 }
 
-                currently_inside -= 1;
+                *currently_inside -= 1;
+
                 self
             }
         }
@@ -129,13 +130,12 @@ impl Rooms {
         self.room_count
     }
 
-    fn change_state<F>(&self, apply: F, room: i32) where F: FnOnce(State) -> State {
+    fn change_state_blk<F>(&self, apply: F, room: i32) where F: FnOnce(State, i32) -> State {
         loop {
             let lock_result = self.state.try_lock();
 
             match lock_result {
                 Ok(mut lock_guard) => {
-
                     match lock_guard.deref() {
                         State::FREE => {}
                         State::OCCUPIED { room_nr, .. } => {
@@ -144,17 +144,17 @@ impl Rooms {
 
                                 Backoff::backoff();
 
-                                continue
+                                continue;
                             }
                         }
                     }
 
                     //We only want to occupy the room when room == the current room_nr or the state is free
 
-                    *lock_guard = apply.call_once((*lock_guard, ));
+                    *lock_guard = apply.call_once((*lock_guard, room));
 
                     Backoff::reset();
-                    break
+                    break;
                 }
                 Err(_) => {
                     Backoff::backoff();
@@ -163,30 +163,88 @@ impl Rooms {
         }
     }
 
-    pub fn enter(&self, room: i32) -> Result<(), RoomAcquireError> {
-        if room <= 0 || room >= self.room_count() as i32 {
+    fn change_state<F>(&self, apply: F, room: i32) -> Result<(), RoomAcquireError> where F: FnOnce(State, i32) -> State {
+        loop {
+            let lock_result = self.state.try_lock();
+
+            match lock_result {
+                Ok(mut lock_guard) => {
+                    match lock_guard.deref() {
+                        State::FREE => {}
+                        State::OCCUPIED { room_nr, .. } => {
+                            if room != *room_nr {
+                                drop(lock_guard);
+
+                                return Err(RoomAcquireError::FailedRoomOccupied);
+                            }
+                        }
+                    }
+
+                    //We only want to occupy the room when room == the current room_nr or the state is free
+                    *lock_guard = apply.call_once((*lock_guard, room));
+
+                    println!("current state : {}",
+                             match *lock_guard {
+                                 State::FREE => {
+                                     String::from("Free")
+                                 }
+                                 State::OCCUPIED { currently_inside, .. } => {
+                                     format!("Occupied {}", currently_inside)
+                                 }
+                             });
+
+                    return Ok(());
+                }
+                Err(_) => {
+                    return Err(RoomAcquireError::FailedToGetLock);
+                }
+            }
+        }
+    }
+
+
+    pub fn enter_blk(&self, room: i32) -> Result<(), RoomAcquireError> {
+        if room <= 0 || room > self.room_count() as i32 {
             return Err(RoomAcquireError::NoRoom);
         }
 
-        self.change_state(State::enter, room);
+        self.change_state_blk(State::enter, room);
 
         Ok(())
     }
 
-    pub fn leave(&self, room: i32) -> Result<(), RoomAcquireError>  {
-        if room <= 0 || room >= self.room_count() as i32 {
+    pub fn leave_blk(&self, room: i32) -> Result<(), RoomAcquireError> {
+        if room <= 0 || room > self.room_count() as i32 {
             return Err(RoomAcquireError::NoRoom);
         }
 
-        self.change_state(State::leave, room);
+        self.change_state_blk(State::leave, room);
 
         Ok(())
+    }
+
+    pub fn enter(&self, room: i32) -> Result<(), RoomAcquireError> {
+        if room <= 0 || room > self.room_count() as i32 {
+            return Err(RoomAcquireError::NoRoom);
+        }
+
+        return self.change_state(State::enter, room);
+    }
+
+    pub fn leave(&self, room: i32) -> Result<(), RoomAcquireError> {
+        if room <= 0 || room > self.room_count() as i32 {
+            return Err(RoomAcquireError::NoRoom);
+        }
+
+        return self.change_state(State::leave, room);
     }
 }
 
 #[derive(Debug)]
 pub enum RoomAcquireError {
-    NoRoom
+    NoRoom,
+    FailedToGetLock,
+    FailedRoomOccupied,
 }
 
 impl Error for RoomAcquireError {}
@@ -197,6 +255,38 @@ impl Display for RoomAcquireError {
             RoomAcquireError::NoRoom => {
                 write!(f, "No room by that ID")
             }
+            RoomAcquireError::FailedToGetLock => {
+                write!(f, "Failed to get the lock")
+            }
+            RoomAcquireError::FailedRoomOccupied => {
+                write!(f, "Failed as another room is already occupied")
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod util_tests {
+    use crate::utils::backoff::{RoomAcquireError, Rooms};
+
+    const ROOM_1: i32 = 1;
+    const ROOM_2: i32 = 2;
+
+    #[test]
+    fn test_rooms_sequential() {
+        let rooms = Rooms::new(2);
+
+        assert!(rooms.enter(ROOM_1).is_ok());
+
+        assert!(rooms.enter(ROOM_2).is_err());
+
+        assert!(rooms.enter(ROOM_1).is_ok());
+
+        assert!(rooms.leave(ROOM_1).is_ok());
+        assert!(rooms.leave(ROOM_1).is_ok());
+
+        assert!(rooms.enter(ROOM_2).is_ok());
+
+        assert!(rooms.enter(ROOM_1).is_err());
     }
 }
