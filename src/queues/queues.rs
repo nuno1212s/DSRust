@@ -183,6 +183,7 @@ mod tests {
         let limit = 10;
 
         println!("Testing LFArrayQueue");
+
         test_spsc(LFArrayQueue::new(limit), limit, 10000);
 
         println!("Testing MQueue with backoff");

@@ -15,21 +15,55 @@ thread_local! {
 
 static MAX_DELAY: u64 = Duration::from_millis(1).as_nanos() as u64 - 1;
 static MIN_DELAY: u64 = 1;
+static MIN_DELAY_FOR_SLEEP: u64 = Duration::from_micros(1).as_nanos() as u64;
 static MULTIPLIER: u64 = 2;
 
 pub struct Backoff {}
 
 impl Backoff {
+    pub fn backoff_return_time() -> Duration {
+        CURRENT_BACKOFF.with(|f| {
+            let mut current_backoff = f.get();
+
+            let sleep_dur = fastrand::u64(0..current_backoff);
+
+            let duration = Duration::from_nanos(sleep_dur);
+
+            if sleep_dur > MIN_DELAY_FOR_SLEEP {
+                //Since the system might not be 100% granular, only sleep when the
+                //amount of sleep time is not negligible
+                thread::sleep(duration);
+            }
+
+            f.replace(min(current_backoff * MULTIPLIER, MAX_DELAY));
+
+            duration
+        })
+    }
+
     pub fn backoff() {
         CURRENT_BACKOFF.with(|f| {
             let mut current_backoff = f.get();
 
             let sleep_dur = fastrand::u64((0..current_backoff));
 
-            //thread::sleep(Duration::from_nanos(sleep_dur));
+            if sleep_dur > MIN_DELAY_FOR_SLEEP {
+                //Since the system might not be 100% granular, only sleep when the
+                //amount of sleep time is not negligible
+
+                let duration = Duration::from_nanos(sleep_dur);
+
+                thread::sleep(duration);
+            }
 
             f.replace(min(current_backoff * MULTIPLIER, MAX_DELAY));
         });
+    }
+
+    pub fn current_limit() -> u64 {
+        CURRENT_BACKOFF.with(|f| {
+            f.get()
+        })
     }
 
     pub fn reset() {
@@ -232,7 +266,7 @@ impl Rooms {
             Err(_) => {
                 Err(RoomAcquireError::FailedToGetLock)
             }
-        }
+        };
     }
 
     pub fn enter_blk(&self, room: i32) -> Result<(), RoomAcquireError> {
@@ -299,11 +333,24 @@ impl Display for RoomAcquireError {
 
 #[cfg(test)]
 mod util_tests {
-    use crate::utils::backoff::{RoomAcquireError, Rooms};
+    use std::time::Instant;
+
+    use crate::utils::backoff::{Backoff, RoomAcquireError, Rooms};
 
     const ROOM_1: i32 = 1;
     const ROOM_2: i32 = 2;
     const ROOMS: u32 = 2;
+
+    #[test]
+    fn test_backoff() {
+        for _ in 0..100 {
+            let instant = Instant::now();
+
+            let duration = Backoff::backoff_return_time();
+
+            println!("Was expecting {:?} but got {:?}", duration, instant.elapsed())
+        }
+    }
 
     #[test]
     fn test_rooms_sequential() {

@@ -35,7 +35,7 @@ impl<T> LFArrayQueue<T> {
             array: UnsafeWrapper::new(vec),
             head: AtomicU32::new(0),
             tail: AtomicU32::new(0),
-            rooms: Rooms::new(3),
+            rooms: Rooms::new_backoff(3, true),
             is_full: AtomicBool::new(false),
             capacity: expected_size,
         }

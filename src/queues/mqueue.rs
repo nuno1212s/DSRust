@@ -222,6 +222,8 @@ impl<T> BQueue<T> for MQueue<T> {
                         if size >= self.capacity() as i64 {
                             self.size.fetch_sub(1, Ordering::Relaxed);
 
+                            drop(lock_guard);
+
                             Backoff::backoff();
 
                             continue;
@@ -279,6 +281,8 @@ impl<T> BQueue<T> for MQueue<T> {
 
                         if size <= 0 {
                             self.size.fetch_add(1, Ordering::Relaxed);
+
+                            drop(lock_guard);
 
                             Backoff::backoff();
 
