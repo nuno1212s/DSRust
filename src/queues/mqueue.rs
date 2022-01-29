@@ -289,7 +289,7 @@ impl<T> BQueue<T> for MQueue<T> {
 
                         lock_guard.1 = (head + 1) % self.capacity() as i64;
 
-                        let elem = lock_guard.0.get_mut((head + size) as usize % self.capacity()).unwrap().take();
+                        let elem = lock_guard.0.get_mut(head as usize % self.capacity()).unwrap().take();
 
                         drop(lock_guard);
 
@@ -323,7 +323,7 @@ impl<T> BQueue<T> for MQueue<T> {
 
             lock_guard.1 = (head + 1) % self.capacity() as i64;
 
-            let result = lock_guard.0.get_mut((head + size) as usize % self.capacity()).unwrap().take();
+            let result = lock_guard.0.get_mut(head as usize % self.capacity()).unwrap().take();
 
             self.lock_notifier.notify_all();
 

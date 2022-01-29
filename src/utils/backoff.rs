@@ -1,47 +1,40 @@
 use std::borrow::Borrow;
 use std::cell::Cell;
+use std::cmp::min;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::ops::Deref;
 use std::sync::{Condvar, Mutex, MutexGuard, TryLockResult};
+use std::thread;
 use std::thread::sleep;
 use std::time::Duration;
 
-use rand::RngCore;
-
 thread_local! {
-    static CURRENT_BACKOFF : Cell<u64> = Cell::new(1);
+    static CURRENT_BACKOFF : Cell<u64> = Cell::new(MIN_DELAY);
 }
 
-static MAX_DELAY: u64 = Duration::from_secs(1).as_millis() as u64;
+static MAX_DELAY: u64 = Duration::from_millis(1).as_nanos() as u64 - 1;
+static MIN_DELAY: u64 = 1;
 static MULTIPLIER: u64 = 2;
 
 pub struct Backoff {}
 
 impl Backoff {
     pub fn backoff() {
-        CURRENT_BACKOFF.with(move |f| {
+        CURRENT_BACKOFF.with(|f| {
             let mut current_backoff = f.get();
 
-            current_backoff *= MULTIPLIER;
+            let sleep_dur = fastrand::u64((0..current_backoff));
 
-            if current_backoff >= MAX_DELAY {
-                current_backoff = MAX_DELAY;
-            }
+            //thread::sleep(Duration::from_nanos(sleep_dur));
 
-            let mut rng = rand::thread_rng();
-
-            let sleep_dur = rng.next_u64() % current_backoff;
-
-            f.replace(current_backoff);
-
-            sleep(Duration::from_millis(sleep_dur));
+            f.replace(min(current_backoff * MULTIPLIER, MAX_DELAY));
         });
     }
 
     pub fn reset() {
-        CURRENT_BACKOFF.with(move |f| {
-            let _previous = f.replace(1);
+        CURRENT_BACKOFF.with(|f| {
+            let _previous = f.replace(MIN_DELAY);
         });
     }
 }
@@ -175,7 +168,6 @@ impl Rooms {
                         //We only want to occupy the room when room == the current room_nr or the state is free
                         *lock_guard = apply.call_once((*lock_guard, room));
 
-                        Backoff::reset();
                         break;
                     }
                     Err(_) => {
@@ -183,6 +175,8 @@ impl Rooms {
                     }
                 }
             }
+
+            Backoff::reset();
         } else {
             let mut lock_guard = self.state.lock().unwrap();
 
@@ -332,7 +326,5 @@ mod util_tests {
     #[test]
     fn test_multi_threading() {
         let rooms = Rooms::new(ROOMS);
-
-
     }
 }

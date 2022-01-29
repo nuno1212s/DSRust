@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::queues::queues::{BQueue, Queue, QueueError, SizableQueue};
 use crate::utils::backoff::{Backoff, Rooms};
+use crate::utils::memory_access::UnsafeWrapper;
 
 const SIZE_ROOM: i32 = 1;
 const ADD_ROOM: i32 = 2;
@@ -13,8 +14,8 @@ const REM_ROOM: i32 = 3;
 ///Working with many concurrent threads
 ///TODO: Fix the issue that is caused by the head and tail being strictly ascending
 ///Therefore we will reach a point of overflow with continued use.
-pub struct LFQueue<T> {
-    array: UnsafeCell<Vec<Option<T>>>,
+pub struct LFArrayQueue<T> {
+    array: UnsafeWrapper<Vec<Option<T>>>,
     head: AtomicU32,
     tail: AtomicU32,
     rooms: Rooms,
@@ -22,7 +23,7 @@ pub struct LFQueue<T> {
     capacity: usize,
 }
 
-impl<T> LFQueue<T> {
+impl<T> LFArrayQueue<T> {
     pub fn new(expected_size: usize) -> Self {
         let mut vec = Vec::with_capacity(expected_size);
 
@@ -31,7 +32,7 @@ impl<T> LFQueue<T> {
         }
 
         Self {
-            array: UnsafeCell::new(vec),
+            array: UnsafeWrapper::new(vec),
             head: AtomicU32::new(0),
             tail: AtomicU32::new(0),
             rooms: Rooms::new(3),
@@ -45,7 +46,7 @@ impl<T> LFQueue<T> {
     }
 }
 
-impl<T> SizableQueue for LFQueue<T> {
+impl<T> SizableQueue for LFArrayQueue<T> {
     fn size(&self) -> u32 {
         self.rooms.enter_blk(SIZE_ROOM);
 
@@ -57,7 +58,7 @@ impl<T> SizableQueue for LFQueue<T> {
     }
 }
 
-impl<T> Queue<T> for LFQueue<T> where T: Debug {
+impl<T> Queue<T> for LFArrayQueue<T> where T: Debug {
     fn enqueue(&self, elem: T) -> Result<(), QueueError> {
         if self.is_full.load(Ordering::Relaxed) {
             //if the array is already full, we don't have to try to enter the room,
@@ -159,7 +160,7 @@ impl<T> Queue<T> for LFQueue<T> where T: Debug {
     }
 }
 
-impl<T> BQueue<T> for LFQueue<T> {
+impl<T> BQueue<T> for LFArrayQueue<T> {
     fn enqueue_blk(&self, elem: T) {
         loop {
             if self.is_full.load(Ordering::Relaxed) {
@@ -222,9 +223,7 @@ impl<T> BQueue<T> for LFQueue<T> {
                     t = array_mut.get_mut(pos).unwrap().take().unwrap();
                 }
 
-                if self.is_full.load(Ordering::SeqCst) {
-                    self.is_full.store(false, Ordering::Relaxed);
-                }
+                self.is_full.store(false, Ordering::Relaxed);
 
                 self.rooms.leave_blk(REM_ROOM);
 
@@ -295,5 +294,3 @@ impl<T> BQueue<T> for LFQueue<T> {
         }
     }
 }
-
-

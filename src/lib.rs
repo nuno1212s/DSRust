@@ -2,10 +2,11 @@
 
 pub mod utils {
     pub mod backoff;
+    pub mod memory_access;
 }
 
 pub mod queues {
-    pub mod lfqueue;
+    pub mod lfarrayqueue;
     pub mod queues;
     pub mod mqueue;
 }
