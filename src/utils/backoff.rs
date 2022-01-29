@@ -1,8 +1,9 @@
+use std::borrow::Borrow;
 use std::cell::Cell;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::ops::Deref;
-use std::sync::{Mutex, MutexGuard, TryLockResult};
+use std::sync::{Condvar, Mutex, MutexGuard, TryLockResult};
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -116,14 +117,35 @@ impl State {
 pub struct Rooms {
     state: Mutex<State>,
     room_count: u32,
+    backoff: bool,
+    cond_var: Option<Condvar>,
 }
 
 impl Rooms {
+    pub fn new_backoff(room_count: u32, backoff: bool) -> Self {
+        Self {
+            state: Mutex::new(State::FREE),
+            room_count,
+            backoff,
+            cond_var: if backoff { None } else { Some(Condvar::new()) },
+        }
+    }
+
     pub fn new(room_count: u32) -> Self {
         Self {
             state: Mutex::new(State::FREE),
             room_count,
+            backoff: true,
+            cond_var: None,
         }
+    }
+
+    fn backoff(&self) -> bool {
+        self.backoff
+    }
+
+    fn cond_var(&self) -> Option<&Condvar> {
+        self.cond_var.as_ref()
     }
 
     pub fn room_count(&self) -> u32 {
@@ -131,77 +153,93 @@ impl Rooms {
     }
 
     fn change_state_blk<F>(&self, apply: F, room: i32) where F: FnOnce(State, i32) -> State {
-        loop {
-            let lock_result = self.state.try_lock();
+        if self.backoff() {
+            loop {
+                let lock_result = self.state.try_lock();
 
-            match lock_result {
-                Ok(mut lock_guard) => {
-                    match lock_guard.deref() {
-                        State::FREE => {}
-                        State::OCCUPIED { room_nr, .. } => {
-                            if room != *room_nr {
-                                drop(lock_guard);
+                match lock_result {
+                    Ok(mut lock_guard) => {
+                        match lock_guard.deref() {
+                            State::FREE => {}
+                            State::OCCUPIED { room_nr, .. } => {
+                                if room != *room_nr {
+                                    drop(lock_guard);
 
-                                Backoff::backoff();
+                                    Backoff::backoff();
 
-                                continue;
+                                    continue;
+                                }
                             }
                         }
+
+                        //We only want to occupy the room when room == the current room_nr or the state is free
+                        *lock_guard = apply.call_once((*lock_guard, room));
+
+                        Backoff::reset();
+                        break;
                     }
-
-                    //We only want to occupy the room when room == the current room_nr or the state is free
-
-                    *lock_guard = apply.call_once((*lock_guard, room));
-
-                    Backoff::reset();
-                    break;
-                }
-                Err(_) => {
-                    Backoff::backoff();
+                    Err(_) => {
+                        Backoff::backoff();
+                    }
                 }
             }
+        } else {
+            let mut lock_guard = self.state.lock().unwrap();
+
+            loop {
+                match lock_guard.deref() {
+                    State::FREE => {
+                        break;
+                    }
+                    State::OCCUPIED { room_nr, .. } => {
+                        if room != *room_nr {
+                            lock_guard = self.cond_var().unwrap().wait(lock_guard).unwrap();
+
+                            continue;
+                        }
+
+                        //If we are in the correct room, proceed
+                        break;
+                    }
+                }
+            }
+
+            *lock_guard = apply.call_once((*lock_guard, room));
+
+            self.cond_var().unwrap().notify_all();
         }
     }
 
     fn change_state<F>(&self, apply: F, room: i32) -> Result<(), RoomAcquireError> where F: FnOnce(State, i32) -> State {
-        loop {
-            let lock_result = self.state.try_lock();
+        let lock_result = self.state.try_lock();
 
-            match lock_result {
-                Ok(mut lock_guard) => {
-                    match lock_guard.deref() {
-                        State::FREE => {}
-                        State::OCCUPIED { room_nr, .. } => {
-                            if room != *room_nr {
-                                drop(lock_guard);
+        return match lock_result {
+            Ok(mut lock_guard) => {
+                match lock_guard.deref() {
+                    State::FREE => {}
+                    State::OCCUPIED { room_nr, .. } => {
+                        if room != *room_nr {
+                            drop(lock_guard);
 
-                                return Err(RoomAcquireError::FailedRoomOccupied);
-                            }
+                            return Err(RoomAcquireError::FailedRoomOccupied);
                         }
                     }
-
-                    //We only want to occupy the room when room == the current room_nr or the state is free
-                    *lock_guard = apply.call_once((*lock_guard, room));
-
-                    println!("current state : {}",
-                             match *lock_guard {
-                                 State::FREE => {
-                                     String::from("Free")
-                                 }
-                                 State::OCCUPIED { currently_inside, .. } => {
-                                     format!("Occupied {}", currently_inside)
-                                 }
-                             });
-
-                    return Ok(());
                 }
-                Err(_) => {
-                    return Err(RoomAcquireError::FailedToGetLock);
+
+                //We only want to occupy the room when room == the current room_nr or the state is free
+                *lock_guard = apply.call_once((*lock_guard, room));
+
+                if !self.backoff() {
+                    (&self.cond_var().unwrap()).notify_all();
                 }
+
+                Ok(())
+            }
+            Err(_) => {
+                Err(RoomAcquireError::FailedToGetLock)
             }
         }
     }
-
 
     pub fn enter_blk(&self, room: i32) -> Result<(), RoomAcquireError> {
         if room <= 0 || room > self.room_count() as i32 {
@@ -271,10 +309,11 @@ mod util_tests {
 
     const ROOM_1: i32 = 1;
     const ROOM_2: i32 = 2;
+    const ROOMS: u32 = 2;
 
     #[test]
     fn test_rooms_sequential() {
-        let rooms = Rooms::new(2);
+        let rooms = Rooms::new(ROOMS);
 
         assert!(rooms.enter(ROOM_1).is_ok());
 
@@ -288,5 +327,12 @@ mod util_tests {
         assert!(rooms.enter(ROOM_2).is_ok());
 
         assert!(rooms.enter(ROOM_1).is_err());
+    }
+
+    #[test]
+    fn test_multi_threading() {
+        let rooms = Rooms::new(ROOMS);
+
+
     }
 }

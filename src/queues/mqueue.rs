@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use std::sync::{Condvar, Mutex, TryLockResult};
 use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -7,17 +8,23 @@ use crate::utils::backoff::Backoff;
 pub struct MQueue<T> {
     capacity: usize,
     size: AtomicI64,
-    array: Mutex<(Vec<T>, i64)>,
+    array: Mutex<(Vec<Option<T>>, i64)>,
     lock_notifier: Condvar,
     backoff: bool,
 }
 
 impl<T> MQueue<T> {
     pub fn new(capacity: usize, use_backoff: bool) -> Self {
+        let mut vec = Vec::with_capacity(capacity);
+
+        for _ in 0..capacity {
+            vec.push(Option::None);
+        }
+
         Self {
             capacity,
             size: AtomicI64::new(0),
-            array: Mutex::new((Vec::with_capacity(capacity), 0)),
+            array: Mutex::new((vec, 0)),
             lock_notifier: Condvar::new(),
             backoff: use_backoff,
         }
@@ -37,7 +44,7 @@ impl<T> SizableQueue for MQueue<T> {
     }
 }
 
-impl<T> Queue<T> for MQueue<T> {
+impl<T> Queue<T> for MQueue<T> where T: Debug{
     fn enqueue(&self, elem: T) -> Result<(), QueueError> {
         if self.backoff() {
             loop {
@@ -62,8 +69,10 @@ impl<T> Queue<T> for MQueue<T> {
 
                         let mut vector = &mut lock_guard.0;
 
-                        vector.insert((head + size) as usize % self.capacity(),
-                                      elem);
+                        let index = (head + size) as usize % self.capacity();
+
+                        vector.get_mut(index).unwrap()
+                            .insert(elem);
 
                         break;
                     }
@@ -93,7 +102,7 @@ impl<T> Queue<T> for MQueue<T> {
 
             let head = lock_guard.1;
 
-            (&mut lock_guard.0).insert((size + head) as usize % self.capacity(), elem);
+            (&mut lock_guard.0).get_mut((size + head) as usize % self.capacity()).unwrap().insert(elem);
 
             Ok(())
         }
@@ -124,13 +133,13 @@ impl<T> Queue<T> for MQueue<T> {
 
                         lock_guard.1 = (head + 1) % self.capacity() as i64;
 
-                        let elem = lock_guard.0.remove((head + size) as usize % self.capacity());
+                        let elem = lock_guard.0.get_mut(head as usize % self.capacity()).unwrap().take();
 
                         drop(lock_guard);
 
                         Backoff::reset();
 
-                        return Some(elem);
+                        return elem;
                     }
                     Err(_er) => {}
                 }
@@ -155,7 +164,7 @@ impl<T> Queue<T> for MQueue<T> {
 
             lock_guard.1 = (head + 1) % self.capacity() as i64;
 
-            Some(lock_guard.0.remove((head + size) as usize % self.capacity()))
+            lock_guard.0.get_mut(head as usize % self.capacity()).unwrap().take()
         }
     }
 
@@ -178,7 +187,7 @@ impl<T> Queue<T> for MQueue<T> {
                     let mut current_size: i64 = self.size.fetch_sub(1, Ordering::Relaxed);
 
                     loop {
-                        vec.push(array.remove((head + current_size) as usize % self.capacity()));
+                        vec.push(array.get_mut((head + current_size) as usize % self.capacity()).unwrap().take().unwrap());
 
                         head = (head + 1) % self.capacity() as i64;
                         current_size = self.size.fetch_sub(1, Ordering::Relaxed);
@@ -220,8 +229,7 @@ impl<T> BQueue<T> for MQueue<T> {
 
                         let head = lock_guard.1;
 
-                        lock_guard.0.insert(((head + size) as usize % self.capacity()),
-                                            elem);
+                        lock_guard.0.get_mut((head + size) as usize % self.capacity()).unwrap().insert(elem);
 
                         break;
                     }
@@ -247,7 +255,7 @@ impl<T> BQueue<T> for MQueue<T> {
 
             let head = lock_guard.1;
 
-            (&mut lock_guard.0).insert((size + head) as usize % self.capacity(), elem);
+            (&mut lock_guard.0).get_mut((size + head) as usize % self.capacity()).unwrap().insert(elem);
 
             //Notify the threads that are waiting for the notification to pop an item
             //We notify_all because since the OS is not deterministic and if it only wakes up a thread
@@ -281,13 +289,13 @@ impl<T> BQueue<T> for MQueue<T> {
 
                         lock_guard.1 = (head + 1) % self.capacity() as i64;
 
-                        let elem = lock_guard.0.remove((head + size) as usize % self.capacity());
+                        let elem = lock_guard.0.get_mut((head + size) as usize % self.capacity()).unwrap().take();
 
                         drop(lock_guard);
 
                         Backoff::reset();
 
-                        return elem;
+                        return elem.unwrap();
                     }
 
                     Err(_er) => {}
@@ -315,11 +323,11 @@ impl<T> BQueue<T> for MQueue<T> {
 
             lock_guard.1 = (head + 1) % self.capacity() as i64;
 
-            let result = lock_guard.0.remove((head + size) as usize % self.capacity());
+            let result = lock_guard.0.get_mut((head + size) as usize % self.capacity()).unwrap().take();
 
             self.lock_notifier.notify_all();
 
-            result
+            result.unwrap()
         }
     }
 

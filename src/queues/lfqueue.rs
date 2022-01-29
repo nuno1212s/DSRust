@@ -1,4 +1,5 @@
-use std::cell::{UnsafeCell};
+use std::cell::UnsafeCell;
+use std::fmt::Debug;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::queues::queues::{BQueue, Queue, QueueError, SizableQueue};
@@ -13,7 +14,7 @@ const REM_ROOM: i32 = 3;
 ///TODO: Fix the issue that is caused by the head and tail being strictly ascending
 ///Therefore we will reach a point of overflow with continued use.
 pub struct LFQueue<T> {
-    array: UnsafeCell<Vec<T>>,
+    array: UnsafeCell<Vec<Option<T>>>,
     head: AtomicU32,
     tail: AtomicU32,
     rooms: Rooms,
@@ -23,8 +24,14 @@ pub struct LFQueue<T> {
 
 impl<T> LFQueue<T> {
     pub fn new(expected_size: usize) -> Self {
+        let mut vec = Vec::with_capacity(expected_size);
+
+        for _ in 0..expected_size {
+            vec.push(Option::None);
+        }
+
         Self {
-            array: UnsafeCell::new(Vec::with_capacity(expected_size)),
+            array: UnsafeCell::new(vec),
             head: AtomicU32::new(0),
             tail: AtomicU32::new(0),
             rooms: Rooms::new(3),
@@ -50,7 +57,7 @@ impl<T> SizableQueue for LFQueue<T> {
     }
 }
 
-impl<T> Queue<T> for LFQueue<T> {
+impl<T> Queue<T> for LFQueue<T> where T: Debug {
     fn enqueue(&self, elem: T) -> Result<(), QueueError> {
         if self.is_full.load(Ordering::Relaxed) {
             //if the array is already full, we don't have to try to enter the room,
@@ -69,7 +76,7 @@ impl<T> Queue<T> for LFQueue<T> {
             unsafe {
                 let array_mut = &mut *self.array.get();
 
-                array_mut.insert(prev_tail as usize % self.capacity(), elem);
+                array_mut.get_mut(prev_tail as usize % self.capacity()).unwrap().insert(elem);
             }
 
             //In case the element we have inserted is the last one,
@@ -82,7 +89,6 @@ impl<T> Queue<T> for LFQueue<T> {
 
             return Result::Ok(());
         }
-
 
         self.tail.fetch_sub(1, Ordering::SeqCst);
 
@@ -104,12 +110,10 @@ impl<T> Queue<T> for LFQueue<T> {
             unsafe {
                 let array_mut = &mut *self.array.get();
 
-                t = array_mut.remove(pos);
+                t = array_mut.get_mut(pos).unwrap().take().unwrap();
             }
 
-            if self.is_full.load(Ordering::SeqCst) {
-                self.is_full.store(false, Ordering::Relaxed);
-            }
+            self.is_full.store(false, Ordering::Relaxed);
 
             self.rooms.leave_blk(REM_ROOM);
 
@@ -143,7 +147,7 @@ impl<T> Queue<T> for LFQueue<T> {
 
                     //Move the values into the new vector
                     for pos in prev_head..current_tail {
-                        new_vec.push(x.remove(pos as usize));
+                        new_vec.push(x.get_mut(pos as usize).unwrap().take().unwrap());
                     }
                 }
             }
@@ -176,7 +180,7 @@ impl<T> BQueue<T> for LFQueue<T> {
                 unsafe {
                     let array_mut = &mut *self.array.get();
 
-                    array_mut.insert(prev_tail as usize % self.capacity(), elem);
+                    array_mut.get_mut(prev_tail as usize % self.capacity()).unwrap().insert(elem);
                 }
 
                 //In case the element we have inserted is the last one,
@@ -215,7 +219,7 @@ impl<T> BQueue<T> for LFQueue<T> {
                 unsafe {
                     let array_mut = &mut *self.array.get();
 
-                    t = array_mut.remove(pos);
+                    t = array_mut.get_mut(pos).unwrap().take().unwrap();
                 }
 
                 if self.is_full.load(Ordering::SeqCst) {
@@ -256,7 +260,6 @@ impl<T> BQueue<T> for LFQueue<T> {
             let mut count = last_element - prev_head;
 
             if count > 0 {
-
                 if count > left_to_collect as u32 {
                     let excess = count - left_to_collect as u32;
 
@@ -275,7 +278,7 @@ impl<T> BQueue<T> for LFQueue<T> {
 
                     //Move the values into the new vector
                     for pos in prev_head..last_element {
-                        new_vec.push(x.remove(pos as usize));
+                        new_vec.push(x.get_mut(pos as usize).unwrap().take().unwrap());
                     }
                 }
             }
@@ -283,7 +286,6 @@ impl<T> BQueue<T> for LFQueue<T> {
             self.rooms.leave_blk(REM_ROOM);
 
             if left_to_collect <= 0 {
-
                 Backoff::reset();
 
                 return new_vec;
