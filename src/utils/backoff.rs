@@ -5,6 +5,7 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::ops::Deref;
 use std::sync::{Condvar, Mutex, MutexGuard, TryLockResult};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::thread::sleep;
 use std::time::Duration;
@@ -74,16 +75,57 @@ impl Backoff_ {
     }
 }
 
-#[derive(PartialEq, Eq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
 enum State {
     FREE,
     OCCUPIED {
         currently_inside: u32,
-        room_nr: i32,
+        room_nr: u32,
     },
 }
 
+const CURRENTLY_INSIDE_MASK: u64 = 0xFFFFFFFF00000000;
+const ROOM_NR_MASK: u64 = 0x00000000FFFFFFFF;
+
 impl State {
+    pub fn from_stored_state(stored_state: u64) -> Self {
+        if stored_state == 0 {
+            return State::FREE;
+        }
+
+        //Dislocate the currently_inside to the correct position
+        let currently_inside = (stored_state & CURRENTLY_INSIDE_MASK) >> 32;
+        let current_room_nr = stored_state & ROOM_NR_MASK;
+
+        State::OCCUPIED {
+            currently_inside: currently_inside as u32,
+            room_nr: current_room_nr as u32,
+        }
+    }
+
+    pub fn to_stored_state(&self) -> u64
+    {
+        let mut result: u64 = 0;
+
+        return match self {
+            State::FREE => {
+                result
+            }
+            State::OCCUPIED { currently_inside, room_nr } => {
+                let currently_inside_64 = *currently_inside as u64;
+                let current_room = *room_nr as u64;
+
+                //Move currently inside 32 bits to the left, making space for the room
+                //In the following 32 bits
+                result |= currently_inside_64 << 32;
+
+                result |= current_room;
+
+                result
+            }
+        };
+    }
+
     pub fn currently_inside(&self) -> i32 {
         match self {
             State::FREE => { -1 }
@@ -97,42 +139,49 @@ impl State {
         match self {
             State::FREE => { -1 }
             State::OCCUPIED { room_nr, .. } => {
-                *room_nr
+                *room_nr as i32
             }
         }
     }
 
-    pub fn enter(mut self, room_nr: i32) -> Self {
+
+    pub fn enter(&self, new_room_nr: i32) -> Self {
         match self {
             State::FREE => {
                 State::OCCUPIED {
                     currently_inside: 1,
-                    room_nr,
+                    room_nr: new_room_nr as u32,
                 }
             }
-            State::OCCUPIED { ref mut currently_inside, room_nr } => {
-                *currently_inside += 1;
-
-                self
+            State::OCCUPIED { currently_inside, room_nr, .. } => {
+                if new_room_nr as u32 == *room_nr {
+                    State::OCCUPIED {
+                        currently_inside: currently_inside + 1,
+                        room_nr: *room_nr,
+                    }
+                } else {
+                    *self
+                }
             }
         }
     }
 
-    pub fn leave(mut self, _room_nr: i32) -> Self {
-        match self {
+    pub fn leave(&self, _room_nr: i32) -> Self {
+        return match self {
             State::FREE => {
-                self
+                State::FREE
             }
-            State::OCCUPIED { ref mut currently_inside, room_nr } => {
+            State::OCCUPIED { currently_inside, room_nr } => {
                 if *currently_inside <= 1 {
                     return State::FREE;
                 }
 
-                *currently_inside -= 1;
-
-                self
+                State::OCCUPIED {
+                    currently_inside: currently_inside - 1,
+                    room_nr: *room_nr,
+                }
             }
-        }
+        };
     }
 }
 
@@ -143,128 +192,83 @@ impl State {
 /// Whenever any thread joins a room X, no other thread can enter any other room Y, however any number of
 /// threads can enter the room X.
 pub struct Rooms {
-    state: Mutex<State>,
+    state: AtomicU64,
     room_count: u32,
-    backoff: bool,
-    cond_var: Option<Condvar>,
 }
 
 impl Rooms {
-    pub fn new_backoff(room_count: u32, backoff: bool) -> Self {
-        Self {
-            state: Mutex::new(State::FREE),
-            room_count,
-            backoff,
-            cond_var: if backoff { None } else { Some(Condvar::new()) },
-        }
-    }
-
     pub fn new(room_count: u32) -> Self {
         Self {
-            state: Mutex::new(State::FREE),
+            state: AtomicU64::new(0),
             room_count,
-            backoff: true,
-            cond_var: None,
         }
     }
 
-    fn backoff(&self) -> bool {
-        self.backoff
-    }
-
-    fn cond_var(&self) -> Option<&Condvar> {
-        self.cond_var.as_ref()
+    fn current_state(&self) -> State {
+        State::from_stored_state(
+            self.state.load(Ordering::Relaxed))
     }
 
     pub fn room_count(&self) -> u32 {
         self.room_count
     }
 
-    fn change_state_blk<F>(&self, apply: F, room: i32) where F: FnOnce(State, i32) -> State {
-        if self.backoff() {
-            let backoff = Backoff::new();
+    fn change_state_blk<F>(&self, apply: F, room: i32) where F: FnOnce(&State, i32) -> State + Copy {
+        let backoff = Backoff::new();
 
-            loop {
-                let lock_result = self.state.try_lock();
+        loop {
+            let x = self.state.load(Ordering::Relaxed);
 
-                match lock_result {
-                    Ok(mut lock_guard) => {
-                        match lock_guard.deref() {
-                            State::FREE => {}
-                            State::OCCUPIED { room_nr, .. } => {
-                                if room != *room_nr {
-                                    drop(lock_guard);
+            let state = State::from_stored_state(x);
 
-                                    backoff.snooze();
+            match state {
+                State::FREE => {}
+                State::OCCUPIED { room_nr, .. } => {
+                    if room_nr != room as u32 {
+                        backoff.snooze();
 
-                                    continue;
-                                }
-                            }
-                        }
-
-                        //We only want to occupy the room when room == the current room_nr or the state is free
-                        *lock_guard = apply.call_once((*lock_guard, room));
-
-                        break;
-                    }
-                    Err(_) => {
-                        backoff.spin();
-                    }
-                }
-            }
-        } else {
-            let mut lock_guard = self.state.lock().unwrap();
-
-            loop {
-                match lock_guard.deref() {
-                    State::FREE => {
-                        break;
-                    }
-                    State::OCCUPIED { room_nr, .. } => {
-                        if room != *room_nr {
-                            lock_guard = self.cond_var().unwrap().wait(lock_guard).unwrap();
-
-                            continue;
-                        }
-
-                        //If we are in the correct room, proceed
-                        break;
+                        continue
                     }
                 }
             }
 
-            *lock_guard = apply.call_once((*lock_guard, room));
+            let new_state = apply.call_once((&state, room));
 
-            self.cond_var().unwrap().notify_all();
+            match self.state.compare_exchange(x, new_state.to_stored_state(),
+                                              Ordering::SeqCst,
+                                              Ordering::Relaxed) {
+                Ok(_state) => {
+                    break;
+                }
+                Err(_err) => {
+                    backoff.spin();
+                }
+            }
         }
     }
 
-    fn change_state<F>(&self, apply: F, room: i32) -> Result<(), RoomAcquireError> where F: FnOnce(State, i32) -> State {
-        let lock_result = self.state.try_lock();
+    fn change_state<F>(&self, apply: F, room: i32) -> Result<(), RoomAcquireError> where F: FnOnce(&State, i32) -> State + Copy {
+        let x = self.state.load(Ordering::Relaxed);
 
-        return match lock_result {
-            Ok(mut lock_guard) => {
-                match lock_guard.deref() {
-                    State::FREE => {}
-                    State::OCCUPIED { room_nr, .. } => {
-                        if room != *room_nr {
-                            drop(lock_guard);
+        let state = State::from_stored_state(x);
 
-                            return Err(RoomAcquireError::FailedRoomOccupied);
-                        }
-                    }
+        let new_state = apply.call_once((&state, room));
+
+        match state {
+            State::FREE => {}
+            State::OCCUPIED { room_nr, .. } => {
+                if room_nr != room as u32 {
+                    return Err(RoomAcquireError::FailedRoomOccupied);
                 }
-
-                //We only want to occupy the room when room == the current room_nr or the state is free
-                *lock_guard = apply.call_once((*lock_guard, room));
-
-                if !self.backoff() {
-                    (&self.cond_var().unwrap()).notify_all();
-                }
-
+            }
+        }
+        return match self.state.compare_exchange(x, new_state.to_stored_state(),
+                                                 Ordering::SeqCst,
+                                                 Ordering::Relaxed) {
+            Ok(_state) => {
                 Ok(())
             }
-            Err(_) => {
+            Err(_err) => {
                 Err(RoomAcquireError::FailedToGetLock)
             }
         };
@@ -357,18 +361,27 @@ mod util_tests {
     fn test_rooms_sequential() {
         let rooms = Rooms::new(ROOMS);
 
+        println!("State {:?}", rooms.current_state());
+
         assert!(rooms.enter(ROOM_1).is_ok());
+        println!("State {:?}", rooms.current_state());
 
         assert!(rooms.enter(ROOM_2).is_err());
+        println!("State {:?}", rooms.current_state());
 
         assert!(rooms.enter(ROOM_1).is_ok());
+        println!("State {:?}", rooms.current_state());
 
         assert!(rooms.leave(ROOM_1).is_ok());
+        println!("State {:?}", rooms.current_state());
         assert!(rooms.leave(ROOM_1).is_ok());
+        println!("State {:?}", rooms.current_state());
 
         assert!(rooms.enter(ROOM_2).is_ok());
+        println!("State {:?}", rooms.current_state());
 
         assert!(rooms.enter(ROOM_1).is_err());
+        println!("State {:?}", rooms.current_state());
     }
 
     #[test]

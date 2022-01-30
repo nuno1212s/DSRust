@@ -381,7 +381,7 @@ pub mod queue_tests {
     }
 
     #[test]
-    fn test_two_thread_spsc() {
+    fn test_spsc_() {
         let limit = 10;
         let operations = 100000;
 

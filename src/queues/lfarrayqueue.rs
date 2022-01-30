@@ -38,7 +38,7 @@ impl<T> LFArrayQueue<T> {
             array: UnsafeWrapper::new(vec),
             head: CachePadded::new(AtomicUsize::new(0)),
             tail: CachePadded::new(AtomicUsize::new(0)),
-            rooms: Rooms::new_backoff(3, true),
+            rooms: Rooms::new(3),
             is_full: AtomicBool::new(false),
             capacity: expected_size,
         }
@@ -109,7 +109,7 @@ impl<T> Queue<T> for LFArrayQueue<T> where T: Debug {
         let prev_head = self.head.fetch_add(1, Ordering::SeqCst);
 
         if prev_head < self.tail.load(Ordering::SeqCst) {
-            let pos = prev_head as usize % self.capacity();
+            let pos = prev_head % self.capacity();
 
             unsafe {
                 let array_mut = &mut *self.array.get();
