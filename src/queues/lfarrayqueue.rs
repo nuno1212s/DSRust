@@ -1,9 +1,12 @@
 use std::cell::UnsafeCell;
 use std::fmt::Debug;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use crossbeam_utils::{Backoff, CachePadded};
 
 use crate::queues::queues::{BQueue, Queue, QueueError, SizableQueue};
-use crate::utils::backoff::{Backoff, Rooms};
+use crate::queues::queues::QueueError::MalformedInputVec;
+use crate::utils::backoff;
+use crate::utils::backoff::{Rooms};
 use crate::utils::memory_access::UnsafeWrapper;
 
 const SIZE_ROOM: i32 = 1;
@@ -16,8 +19,8 @@ const REM_ROOM: i32 = 3;
 ///Therefore we will reach a point of overflow with continued use.
 pub struct LFArrayQueue<T> {
     array: UnsafeWrapper<Vec<Option<T>>>,
-    head: AtomicU32,
-    tail: AtomicU32,
+    head: CachePadded<AtomicUsize>,
+    tail: CachePadded<AtomicUsize>,
     rooms: Rooms,
     is_full: AtomicBool,
     capacity: usize,
@@ -33,8 +36,8 @@ impl<T> LFArrayQueue<T> {
 
         Self {
             array: UnsafeWrapper::new(vec),
-            head: AtomicU32::new(0),
-            tail: AtomicU32::new(0),
+            head: CachePadded::new(AtomicUsize::new(0)),
+            tail: CachePadded::new(AtomicUsize::new(0)),
             rooms: Rooms::new_backoff(3, true),
             is_full: AtomicBool::new(false),
             capacity: expected_size,
@@ -47,7 +50,7 @@ impl<T> LFArrayQueue<T> {
 }
 
 impl<T> SizableQueue for LFArrayQueue<T> {
-    fn size(&self) -> u32 {
+    fn size(&self) -> usize {
         self.rooms.enter_blk(SIZE_ROOM);
 
         let size = self.tail.load(Ordering::SeqCst) - self.head.load(Ordering::SeqCst);
@@ -73,7 +76,7 @@ impl<T> Queue<T> for LFArrayQueue<T> where T: Debug {
 
         let head = self.head.load(Ordering::SeqCst);
 
-        if prev_tail - head < self.capacity() as u32 {
+        if prev_tail - head < self.capacity() {
             unsafe {
                 let array_mut = &mut *self.array.get();
 
@@ -82,7 +85,7 @@ impl<T> Queue<T> for LFArrayQueue<T> where T: Debug {
 
             //In case the element we have inserted is the last one,
             //Close the door behind us
-            if (prev_tail - head) + 1 >= self.capacity() as u32 {
+            if (prev_tail - head) + 1 >= self.capacity() {
                 self.is_full.store(true, Ordering::Relaxed);
             }
 
@@ -128,14 +131,15 @@ impl<T> Queue<T> for LFArrayQueue<T> where T: Debug {
         }
     }
 
-    fn dump(&self, count: usize) -> Vec<T> {
-        //Pre allocate the vector to limit to the max the
-        //amount of time we will spend in the critical section
-        let mut new_vec = Vec::with_capacity(count);
+    fn dump(&self, count: usize, vec: &mut Vec<T>) -> Result<usize, QueueError> {
+        if vec.capacity() < count {
+            return Err(MalformedInputVec);
+        }
 
         loop {
             self.rooms.enter_blk(REM_ROOM);
 
+            //Since we are in a remove room we know the tail is not going to be altered
             let current_tail = self.tail.load(Ordering::SeqCst);
 
             let prev_head = self.head.swap(current_tail, Ordering::SeqCst);
@@ -148,26 +152,28 @@ impl<T> Queue<T> for LFArrayQueue<T> where T: Debug {
 
                     //Move the values into the new vector
                     for pos in prev_head..current_tail {
-                        new_vec.push(x.get_mut(pos as usize).unwrap().take().unwrap());
+                        vec.push(x.get_mut(pos as usize).unwrap().take().unwrap());
                     }
                 }
             }
 
             self.rooms.leave_blk(REM_ROOM);
 
-            return new_vec;
+            return Ok(count);
         }
     }
 }
 
 impl<T> BQueue<T> for LFArrayQueue<T> {
     fn enqueue_blk(&self, elem: T) {
+        let backoff = Backoff::new();
+
         loop {
             if self.is_full.load(Ordering::Relaxed) {
                 //if the array is already full, we don't have to try to enter the room,
                 //which could have caused a lot of contention and therefore could have
                 //made removing harder in a multi producer single consumer scenario
-                Backoff::backoff();
+                backoff.snooze();
                 continue;
             }
 
@@ -177,7 +183,7 @@ impl<T> BQueue<T> for LFArrayQueue<T> {
 
             let head = self.head.load(Ordering::SeqCst);
 
-            if prev_tail - head < self.capacity() as u32 {
+            if prev_tail - head < self.capacity() {
                 unsafe {
                     let array_mut = &mut *self.array.get();
 
@@ -186,28 +192,26 @@ impl<T> BQueue<T> for LFArrayQueue<T> {
 
                 //In case the element we have inserted is the last one,
                 //Close the door behind us
-                if (prev_tail - head) + 1 >= self.capacity() as u32 {
+                if (prev_tail - head) + 1 >= self.capacity() {
                     self.is_full.store(true, Ordering::Relaxed);
                 }
 
                 break;
             }
 
-            {
-                self.tail.fetch_sub(1, Ordering::SeqCst);
+            self.tail.fetch_sub(1, Ordering::SeqCst);
 
-                self.rooms.leave_blk(ADD_ROOM);
+            self.rooms.leave_blk(ADD_ROOM);
 
-                Backoff::backoff();
-            }
+            backoff.snooze();
         }
 
         self.rooms.leave_blk(ADD_ROOM);
-        Backoff::reset();
     }
 
     fn pop_blk(&self) -> T {
         let t: T;
+        let backoff = Backoff::new();
 
         loop {
             self.rooms.enter_blk(REM_ROOM);
@@ -233,11 +237,9 @@ impl<T> BQueue<T> for LFArrayQueue<T> {
 
                 self.rooms.leave_blk(REM_ROOM);
 
-                Backoff::backoff();
+                backoff.snooze();
             }
         }
-
-        Backoff::reset();
 
         return t;
     }
@@ -247,7 +249,9 @@ impl<T> BQueue<T> for LFArrayQueue<T> {
         //amount of time we will spend in the critical section
         let mut new_vec = Vec::with_capacity(count);
 
-        let mut left_to_collect = count as i32;
+        let mut left_to_collect = count;
+
+        let backoff = Backoff::new();
 
         loop {
             self.rooms.enter_blk(REM_ROOM);
@@ -259,18 +263,18 @@ impl<T> BQueue<T> for LFArrayQueue<T> {
             let mut count = last_element - prev_head;
 
             if count > 0 {
-                if count > left_to_collect as u32 {
-                    let excess = count - left_to_collect as u32;
+                if count > left_to_collect {
+                    let excess = count - left_to_collect;
 
                     //rewind the uncollected
                     self.head.fetch_sub(excess, Ordering::SeqCst);
 
                     last_element -= excess;
 
-                    count = left_to_collect as u32;
+                    count = left_to_collect;
                 }
 
-                left_to_collect -= count as i32;
+                left_to_collect -= count;
 
                 unsafe {
                     let x = &mut *self.array.get();
@@ -285,12 +289,10 @@ impl<T> BQueue<T> for LFArrayQueue<T> {
             self.rooms.leave_blk(REM_ROOM);
 
             if left_to_collect <= 0 {
-                Backoff::reset();
-
                 return new_vec;
             }
 
-            Backoff::backoff();
+            backoff.snooze();
         }
     }
 }

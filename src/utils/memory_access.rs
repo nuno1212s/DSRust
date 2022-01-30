@@ -21,4 +21,3 @@ impl<T> UnsafeWrapper<T> {
 }
 
 unsafe impl<T> Sync for UnsafeWrapper<T> {}
-

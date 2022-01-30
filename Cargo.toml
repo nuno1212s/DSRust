@@ -7,3 +7,5 @@ edition = "2021"
 
 [dependencies]
 fastrand = "1.6.0"
+crossbeam-utils = "0.8.6"
+crossbeam-queue = "0.3.3"

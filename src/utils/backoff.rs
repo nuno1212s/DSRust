@@ -8,6 +8,7 @@ use std::sync::{Condvar, Mutex, MutexGuard, TryLockResult};
 use std::thread;
 use std::thread::sleep;
 use std::time::Duration;
+use crossbeam_utils::Backoff;
 
 thread_local! {
     static CURRENT_BACKOFF : Cell<u64> = Cell::new(MIN_DELAY);
@@ -18,9 +19,9 @@ static MIN_DELAY: u64 = 1;
 static MIN_DELAY_FOR_SLEEP: u64 = Duration::from_micros(1).as_nanos() as u64;
 static MULTIPLIER: u64 = 2;
 
-pub struct Backoff {}
+pub struct Backoff_ {}
 
-impl Backoff {
+impl Backoff_ {
     pub fn backoff_return_time() -> Duration {
         CURRENT_BACKOFF.with(|f| {
             let mut current_backoff = f.get();
@@ -181,6 +182,8 @@ impl Rooms {
 
     fn change_state_blk<F>(&self, apply: F, room: i32) where F: FnOnce(State, i32) -> State {
         if self.backoff() {
+            let backoff = Backoff::new();
+
             loop {
                 let lock_result = self.state.try_lock();
 
@@ -192,7 +195,7 @@ impl Rooms {
                                 if room != *room_nr {
                                     drop(lock_guard);
 
-                                    Backoff::backoff();
+                                    backoff.snooze();
 
                                     continue;
                                 }
@@ -205,12 +208,10 @@ impl Rooms {
                         break;
                     }
                     Err(_) => {
-                        Backoff::backoff();
+                        backoff.spin();
                     }
                 }
             }
-
-            Backoff::reset();
         } else {
             let mut lock_guard = self.state.lock().unwrap();
 
@@ -335,7 +336,7 @@ impl Display for RoomAcquireError {
 mod util_tests {
     use std::time::Instant;
 
-    use crate::utils::backoff::{Backoff, RoomAcquireError, Rooms};
+    use crate::utils::backoff::{Backoff_, RoomAcquireError, Rooms};
 
     const ROOM_1: i32 = 1;
     const ROOM_2: i32 = 2;
@@ -346,7 +347,7 @@ mod util_tests {
         for _ in 0..100 {
             let instant = Instant::now();
 
-            let duration = Backoff::backoff_return_time();
+            let duration = Backoff_::backoff_return_time();
 
             println!("Was expecting {:?} but got {:?}", duration, instant.elapsed())
         }
