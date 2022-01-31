@@ -6,6 +6,7 @@ use std::fmt::{Display, Formatter};
 use std::ops::Deref;
 use std::sync::{Condvar, Mutex, MutexGuard, TryLockResult};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering::Relaxed;
 use std::thread;
 use std::thread::sleep;
 use std::time::Duration;
@@ -84,8 +85,8 @@ enum State {
     },
 }
 
-const CURRENTLY_INSIDE_MASK: u64 = 0xFFFFFFFF00000000;
-const ROOM_NR_MASK: u64 = 0x00000000FFFFFFFF;
+const CURRENTLY_INSIDE_MASK: u64 = !ROOM_NR_MASK;
+const ROOM_NR_MASK: u64 = 0xFFFFFFFF00000000;
 
 impl State {
     pub fn from_stored_state(stored_state: u64) -> Self {
@@ -94,8 +95,8 @@ impl State {
         }
 
         //Dislocate the currently_inside to the correct position
-        let currently_inside = (stored_state & CURRENTLY_INSIDE_MASK) >> 32;
-        let current_room_nr = stored_state & ROOM_NR_MASK;
+        let currently_inside = stored_state & CURRENTLY_INSIDE_MASK;
+        let current_room_nr = (stored_state & ROOM_NR_MASK) >> 32;
 
         State::OCCUPIED {
             currently_inside: currently_inside as u32,
@@ -112,14 +113,14 @@ impl State {
                 result
             }
             State::OCCUPIED { currently_inside, room_nr } => {
-                let currently_inside_64 = *currently_inside as u64;
-                let current_room = *room_nr as u64;
+                let currently_inside_64 = currently_inside.clone() as u64;
+                let current_room = room_nr.clone() as u64;
+
+                result |= current_room << 32;
 
                 //Move currently inside 32 bits to the left, making space for the room
                 //In the following 32 bits
-                result |= currently_inside_64 << 32;
-
-                result |= current_room;
+                result |= currently_inside_64;
 
                 result
             }
@@ -177,7 +178,7 @@ impl State {
                 }
 
                 State::OCCUPIED {
-                    currently_inside: currently_inside - 1,
+                    currently_inside: (*currently_inside) - 1,
                     room_nr: *room_nr,
                 }
             }
@@ -216,9 +217,9 @@ impl Rooms {
     fn change_state_blk<F>(&self, apply: F, room: i32) where F: FnOnce(&State, i32) -> State + Copy {
         let backoff = Backoff::new();
 
-        loop {
-            let x = self.state.load(Ordering::Relaxed);
+        let mut x = self.state.load(Ordering::Relaxed);
 
+        loop {
             let state = State::from_stored_state(x);
 
             match state {
@@ -227,6 +228,8 @@ impl Rooms {
                     if room_nr != room as u32 {
                         backoff.snooze();
 
+                        x = self.state.load(Relaxed);
+
                         continue
                     }
                 }
@@ -234,13 +237,15 @@ impl Rooms {
 
             let new_state = apply.call_once((&state, room));
 
-            match self.state.compare_exchange(x, new_state.to_stored_state(),
+            match self.state.compare_exchange_weak(x, new_state.to_stored_state(),
                                               Ordering::SeqCst,
                                               Ordering::Relaxed) {
                 Ok(_state) => {
                     break;
                 }
-                Err(_err) => {
+                Err(state) => {
+                    x = state;
+
                     backoff.spin();
                 }
             }
@@ -252,8 +257,6 @@ impl Rooms {
 
         let state = State::from_stored_state(x);
 
-        let new_state = apply.call_once((&state, room));
-
         match state {
             State::FREE => {}
             State::OCCUPIED { room_nr, .. } => {
@@ -262,7 +265,10 @@ impl Rooms {
                 }
             }
         }
-        return match self.state.compare_exchange(x, new_state.to_stored_state(),
+
+        let new_state = apply.call_once((&state, room));
+
+        return match self.state.compare_exchange_weak(x, new_state.to_stored_state(),
                                                  Ordering::SeqCst,
                                                  Ordering::Relaxed) {
             Ok(_state) => {

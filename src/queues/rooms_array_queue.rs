@@ -1,23 +1,25 @@
 use std::cell::UnsafeCell;
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::Ordering::Relaxed;
+
 use crossbeam_utils::{Backoff, CachePadded};
 
 use crate::queues::queues::{BQueue, Queue, QueueError, SizableQueue};
 use crate::queues::queues::QueueError::MalformedInputVec;
 use crate::utils::backoff;
-use crate::utils::backoff::{Rooms};
+use crate::utils::backoff::Rooms;
 use crate::utils::memory_access::UnsafeWrapper;
 
 const SIZE_ROOM: i32 = 1;
 const ADD_ROOM: i32 = 2;
 const REM_ROOM: i32 = 3;
 
-///A bounded, blocking queue with exponential backoff to prevent over contention when
+///A bounded queue with rooms and exponential backoff to prevent over contention when
 ///Working with many concurrent threads
 ///TODO: Fix the issue that is caused by the head and tail being strictly ascending
 ///Therefore we will reach a point of overflow with continued use.
-pub struct LFArrayQueue<T> {
+pub struct LFBRArrayQueue<T> {
     array: UnsafeWrapper<Vec<Option<T>>>,
     head: CachePadded<AtomicUsize>,
     tail: CachePadded<AtomicUsize>,
@@ -26,7 +28,7 @@ pub struct LFArrayQueue<T> {
     capacity: usize,
 }
 
-impl<T> LFArrayQueue<T> {
+impl<T> LFBRArrayQueue<T> {
     pub fn new(expected_size: usize) -> Self {
         let mut vec = Vec::with_capacity(expected_size);
 
@@ -49,7 +51,7 @@ impl<T> LFArrayQueue<T> {
     }
 }
 
-impl<T> SizableQueue for LFArrayQueue<T> {
+impl<T> SizableQueue for LFBRArrayQueue<T> {
     fn size(&self) -> usize {
         self.rooms.enter_blk(SIZE_ROOM);
 
@@ -61,20 +63,20 @@ impl<T> SizableQueue for LFArrayQueue<T> {
     }
 }
 
-impl<T> Queue<T> for LFArrayQueue<T> where T: Debug {
-    fn enqueue(&self, elem: T) -> Result<(), QueueError> {
+impl<T> Queue<T> for LFBRArrayQueue<T> where T: Debug {
+    fn enqueue(&self, elem: T) -> Result<(), QueueError<T>> {
         if self.is_full.load(Ordering::Relaxed) {
             //if the array is already full, we don't have to try to enter the room,
             //which could have caused a lot of contention and therefore could have
             //made removing harder in a multi producer single consumer scenario
-            return Result::Err(QueueError::QueueFull);
+            return Result::Err(QueueError::QueueFull { 0: elem });
         }
 
         self.rooms.enter_blk(ADD_ROOM);
 
         let prev_tail = self.tail.fetch_add(1, Ordering::SeqCst);
 
-        let head = self.head.load(Ordering::SeqCst);
+        let head = self.head.load(Ordering::Relaxed);
 
         if prev_tail - head < self.capacity() {
             unsafe {
@@ -98,7 +100,7 @@ impl<T> Queue<T> for LFArrayQueue<T> where T: Debug {
 
         self.rooms.leave_blk(ADD_ROOM);
 
-        Err(QueueError::QueueFull)
+        Err(QueueError::QueueFull { 0: elem })
     }
 
     fn pop(&self) -> Option<T> {
@@ -131,40 +133,40 @@ impl<T> Queue<T> for LFArrayQueue<T> where T: Debug {
         }
     }
 
-    fn dump(&self, count: usize, vec: &mut Vec<T>) -> Result<usize, QueueError> {
-        if vec.capacity() < count {
+    fn dump(&self, vec: &mut Vec<T>) -> Result<usize, QueueError<T>> {
+        if vec.capacity() < self.capacity() {
             return Err(MalformedInputVec);
         }
 
-        loop {
-            self.rooms.enter_blk(REM_ROOM);
+        self.rooms.enter_blk(REM_ROOM);
 
-            //Since we are in a remove room we know the tail is not going to be altered
-            let current_tail = self.tail.load(Ordering::SeqCst);
+        //Since we are in a remove room we know the tail is not going to be altered
+        let current_tail = self.tail.load(Ordering::Relaxed);
 
-            let prev_head = self.head.swap(current_tail, Ordering::SeqCst);
+        let prev_head = self.head.swap(current_tail, Ordering::SeqCst);
 
-            let count = current_tail - prev_head;
+        let count = current_tail - prev_head;
 
-            if count > 0 {
-                unsafe {
-                    let x = &mut *self.array.get();
+        if count > 0 {
+            unsafe {
+                let x = &mut *self.array.get();
 
-                    //Move the values into the new vector
-                    for pos in prev_head..current_tail {
-                        vec.push(x.get_mut(pos as usize).unwrap().take().unwrap());
-                    }
+                //Move the values into the new vector
+                for pos in prev_head..current_tail {
+                    vec.push(x.get_mut(pos % self.capacity()).unwrap().take().unwrap());
                 }
             }
 
-            self.rooms.leave_blk(REM_ROOM);
-
-            return Ok(count);
+            self.is_full.store(false, Relaxed);
         }
+
+        self.rooms.leave_blk(REM_ROOM);
+
+        return Ok(count);
     }
 }
 
-impl<T> BQueue<T> for LFArrayQueue<T> {
+impl<T> BQueue<T> for LFBRArrayQueue<T> where T: Debug {
     fn enqueue_blk(&self, elem: T) {
         let backoff = Backoff::new();
 
@@ -181,7 +183,7 @@ impl<T> BQueue<T> for LFArrayQueue<T> {
 
             let prev_tail = self.tail.fetch_add(1, Ordering::SeqCst);
 
-            let head = self.head.load(Ordering::SeqCst);
+            let head = self.head.load(Ordering::Relaxed);
 
             if prev_tail - head < self.capacity() {
                 unsafe {
@@ -189,6 +191,8 @@ impl<T> BQueue<T> for LFArrayQueue<T> {
 
                     array_mut.get_mut(prev_tail as usize % self.capacity()).unwrap().insert(elem);
                 }
+
+                self.rooms.leave_blk(ADD_ROOM);
 
                 //In case the element we have inserted is the last one,
                 //Close the door behind us
@@ -205,8 +209,6 @@ impl<T> BQueue<T> for LFArrayQueue<T> {
 
             backoff.snooze();
         }
-
-        self.rooms.leave_blk(ADD_ROOM);
     }
 
     fn pop_blk(&self) -> T {
@@ -218,8 +220,8 @@ impl<T> BQueue<T> for LFArrayQueue<T> {
 
             let prev_head = self.head.fetch_add(1, Ordering::SeqCst);
 
-            if prev_head < self.tail.load(Ordering::SeqCst) {
-                let pos = prev_head as usize % self.capacity();
+            if prev_head < self.tail.load(Ordering::Relaxed) {
+                let pos = prev_head % self.capacity();
 
                 unsafe {
                     let array_mut = &mut *self.array.get();
@@ -245,6 +247,7 @@ impl<T> BQueue<T> for LFArrayQueue<T> {
     }
 
     fn dump_blk(&self, count: usize) -> Vec<T> {
+        todo!();
         //Pre allocate the vector to limit to the max the
         //amount of time we will spend in the critical section
         let mut new_vec = Vec::with_capacity(count);

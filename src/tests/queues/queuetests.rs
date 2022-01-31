@@ -1,5 +1,6 @@
 use crossbeam_queue::ArrayQueue;
-use crate::queues::queues::{BQueue, Queue, QueueError, SizableQueue};
+
+use crate::queues::queues::{Queue, QueueError, SizableQueue};
 
 impl SizableQueue for ArrayQueue<u32> {
     fn size(&self) -> usize {
@@ -8,13 +9,13 @@ impl SizableQueue for ArrayQueue<u32> {
 }
 
 impl Queue<u32> for ArrayQueue<u32> {
-    fn enqueue(&self, elem: u32) -> Result<(), QueueError> {
+    fn enqueue(&self, elem: u32) -> Result<(), QueueError<u32>> {
         match self.push(elem) {
             Ok(_) => {
                 Ok(())
             }
             Err(_) => {
-                Err(QueueError::QueueFull)
+                Err(QueueError::QueueFull { 0: elem })
             }
         }
     }
@@ -23,7 +24,7 @@ impl Queue<u32> for ArrayQueue<u32> {
         self.pop()
     }
 
-    fn dump(&self, count: usize, vec: &mut Vec<u32>) -> Result<usize, QueueError> {
+    fn dump(&self, vec: &mut Vec<u32>) -> Result<usize, QueueError<u32>> {
         todo!()
     }
 }
@@ -31,12 +32,15 @@ impl Queue<u32> for ArrayQueue<u32> {
 #[cfg(test)]
 pub mod queue_tests {
     use std::sync::Arc;
-    use std::time::Instant;
+    use std::thread::sleep;
+    use std::time::{Duration, Instant};
+
     use crossbeam_queue::ArrayQueue;
 
-    use crate::queues::lfarrayqueue::LFArrayQueue;
+    use crate::queues::lf_array_queue::LFBQueue;
     use crate::queues::mqueue::MQueue;
-    use crate::queues::queues::{BQueue, Queue, QueueError};
+    use crate::queues::queues::{BQueue, Queue};
+    use crate::queues::rooms_array_queue::LFBRArrayQueue;
 
     fn test_single_thread_ordering_for<T>(queue: T, count: u32) where T: Queue<u32> {
         for i in 0..count {
@@ -290,7 +294,7 @@ pub mod queue_tests {
         println!("Performed all remove operations in {} millis", i);
     }
 
-    fn test_mpsc_blocking<T>(queue: T, capacity: usize, operations: usize, producer_threads: usize) where T: BQueue<u32> + Send + Sync + 'static {
+    fn test_mpsc_blocking<T>(queue: T, capacity: usize, operations: usize, producer_threads: usize) where T: BQueue<u32> + Queue<u32> + Send + Sync + 'static {
         let operations_per_producer = operations / producer_threads;
 
         let queue_arc = Arc::new(queue);
@@ -321,19 +325,33 @@ pub mod queue_tests {
         //consumer thread
         let mut count = 0;
 
+        let mut vec = Vec::with_capacity(capacity);
+
+        let mut ops = 0;
+
         loop {
-            if count > operations {
+            if count >= operations {
                 break;
             }
 
-            let popped = queue_arc.pop_blk();
+            let popped = queue_arc.dump(&mut vec);
 
-            count = count + 1;
+            vec.clear();
+
+            match popped {
+                Ok(size) => {
+                    count += size;
+                    ops += 1;
+                }
+                Err(e) => {
+                    println!("ERROR {}", e);
+                }
+            }
         }
 
         let i = start.elapsed().as_millis();
 
-        println!("Performed all remove operations in {} millis", i);
+        println!("Performed all remove operations in {} millis removed an average of {} at a time", i, (count / ops));
     }
 
     #[test]
@@ -344,7 +362,7 @@ pub mod queue_tests {
 
         test_single_thread_ordering_for(MQueue::new(limit, false), limit as u32);
 
-        test_single_thread_ordering_for(LFArrayQueue::new(limit), limit as u32);
+        test_single_thread_ordering_for(LFBRArrayQueue::new(limit), limit as u32);
     }
 
     #[test]
@@ -355,7 +373,7 @@ pub mod queue_tests {
 
         test_single_thread_capacity_for(MQueue::new(limit, false), limit as u32);
 
-        test_single_thread_capacity_for(LFArrayQueue::new(limit), limit as u32);
+        test_single_thread_capacity_for(LFBRArrayQueue::new(limit), limit as u32);
     }
 
     #[test]
@@ -363,9 +381,13 @@ pub mod queue_tests {
         let limit = 10;
         let operations = 100000;
 
+        println!("Testing LFRoomArrayQueue");
+
+        test_spsc_blocking(LFBRArrayQueue::new(limit), limit, operations);
+
         println!("Testing LFArrayQueue");
 
-        test_spsc_blocking(LFArrayQueue::new(limit), limit, operations);
+        test_spsc_blocking(LFBQueue::new(limit), limit, operations);
 
         println!("Testing MQueue with backoff");
 
@@ -389,7 +411,11 @@ pub mod queue_tests {
 
         println!("Testing LFArrayQueue");
 
-        test_spsc(LFArrayQueue::new(limit), limit, operations);
+        test_spsc(LFBQueue::new(limit), limit, operations);
+
+        println!("Testing LFRoomArrayQueue");
+
+        test_spsc(LFBRArrayQueue::new(limit), limit, operations);
 
         println!("Testing MQueue with backoff");
 
@@ -405,14 +431,17 @@ pub mod queue_tests {
 
     #[test]
     fn test_mpsc() {
-        let capacity = 100;
-        let operations = 1000000;
+        let capacity = 1000;
+        let operations = 1500000;
 
-        let producer_threads = 10;
+        let producer_threads = 15;
         println!("Testing blocking queues multiple producer single consumer");
 
+        println!("Testing LFRoomArrayQueue");
+        test_mpsc_blocking(LFBRArrayQueue::new(capacity), capacity, operations, producer_threads);
+
         println!("Testing LFArrayQueue");
-        test_mpsc_blocking(LFArrayQueue::new(capacity), capacity, operations, producer_threads);
+        test_mpsc_blocking(LFBQueue::new(capacity), capacity, operations, producer_threads);
 
         println!("Testing Mutex queue with backoff");
         test_mpsc_blocking(MQueue::new(capacity, true), capacity, operations, producer_threads);

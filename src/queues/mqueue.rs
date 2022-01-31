@@ -96,7 +96,7 @@ impl<T> SizableQueue for MQueue<T> {
 }
 
 impl<T> Queue<T> for MQueue<T> where T: Debug {
-    fn enqueue(&self, elem: T) -> Result<(), QueueError> {
+    fn enqueue(&self, elem: T) -> Result<(), QueueError<T>> {
         if self.backoff() {
             let backoff = Backoff::new();
 
@@ -111,7 +111,7 @@ impl<T> Queue<T> for MQueue<T> where T: Debug {
                         let size = lock_guard.size();
 
                         if size >= self.capacity() {
-                            return Err(QueueError::QueueFull);
+                            return Err(QueueError::QueueFull{0: elem});
                         }
 
                         let head = lock_guard.head();
@@ -142,7 +142,7 @@ impl<T> Queue<T> for MQueue<T> where T: Debug {
             let size = lock_guard.size();
 
             if size >= self.capacity() {
-                return Err(QueueError::QueueFull);
+                return Err(QueueError::QueueFull{0: elem});
             }
 
             let head = lock_guard.head();
@@ -219,8 +219,8 @@ impl<T> Queue<T> for MQueue<T> where T: Debug {
         }
     }
 
-    fn dump(&self, count: usize, vec: &mut Vec<T>) -> Result<usize, QueueError> {
-        if count < vec.capacity() {
+    fn dump(&self, vec: &mut Vec<T>) -> Result<usize, QueueError<T>> {
+        if vec.capacity() < self.capacity() {
             return Err(QueueError::MalformedInputVec);
         }
 
@@ -238,25 +238,19 @@ impl<T> Queue<T> for MQueue<T> where T: Debug {
 
                         let mut head = lock_guard.head();
 
-                        let to_remove;
+                        let to_remove= lock_guard.size;
 
-                        if count >= size {
-                            lock_guard.size = 0;
-
-                            to_remove = size;
-                        } else {
-                            lock_guard.size -= count;
-
-                            to_remove = count;
-                        }
+                        let mut cur_size = size;
 
                         for _ in 0..to_remove {
                             vec.push(lock_guard.array().get_mut(head).unwrap().take().unwrap());
 
                             head = (head + 1) % self.capacity();
+                            cur_size -= 1;
                         }
 
                         lock_guard.head = head;
+                        lock_guard.size = cur_size;
 
                         drop(lock_guard);
 
@@ -278,25 +272,18 @@ impl<T> Queue<T> for MQueue<T> where T: Debug {
 
             let mut head = lock_guard.head();
 
-            let to_remove;
-
-            if count >= size {
-                lock_guard.size = 0;
-
-                to_remove = size;
-            } else {
-                lock_guard.size -= count;
-
-                to_remove = count;
-            }
+            let to_remove = lock_guard.size();
+            let mut cur_size = size;
 
             for _ in 0..to_remove {
                 vec.push(lock_guard.array().get_mut(head).unwrap().take().unwrap());
 
                 head = (head + 1) % self.capacity();
+                cur_size -= 1;
             }
 
             lock_guard.head = head;
+            lock_guard.size = cur_size;
 
             self.full_notifier.notify_all();
 
@@ -305,7 +292,7 @@ impl<T> Queue<T> for MQueue<T> where T: Debug {
     }
 }
 
-impl<T> BQueue<T> for MQueue<T> {
+impl<T> BQueue<T> for MQueue<T> where T:Debug{
     fn enqueue_blk(&self, elem: T) {
         if self.backoff() {
             let backoff = Backoff::new();
