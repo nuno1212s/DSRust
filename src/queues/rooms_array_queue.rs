@@ -108,6 +108,7 @@ impl<T> Queue<T> for LFBRArrayQueue<T> where T: Debug {
 
         self.rooms.enter_blk(REM_ROOM);
 
+        //Claim the spot that we want to remove
         let prev_head = self.head.fetch_add(1, Ordering::SeqCst);
 
         if prev_head < self.tail.load(Ordering::SeqCst) {
@@ -125,6 +126,7 @@ impl<T> Queue<T> for LFBRArrayQueue<T> where T: Debug {
 
             Some(t)
         } else {
+            //The location does not contain an element so we release our hold onto that location
             self.head.fetch_sub(1, Ordering::Relaxed);
 
             self.rooms.leave_blk(REM_ROOM);

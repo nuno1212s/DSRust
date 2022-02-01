@@ -1,4 +1,3 @@
-use std::borrow::Borrow;
 use std::cell::Cell;
 use std::cmp::min;
 use std::error::Error;
@@ -10,6 +9,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::thread;
 use std::thread::sleep;
 use std::time::Duration;
+
 use crossbeam_utils::Backoff;
 
 thread_local! {
@@ -48,7 +48,7 @@ impl Backoff_ {
         CURRENT_BACKOFF.with(|f| {
             let mut current_backoff = f.get();
 
-            let sleep_dur = fastrand::u64((0..current_backoff));
+            let sleep_dur = fastrand::u64(0..current_backoff);
 
             if sleep_dur > MIN_DELAY_FOR_SLEEP {
                 //Since the system might not be 100% granular, only sleep when the
@@ -346,7 +346,7 @@ impl Display for RoomAcquireError {
 mod util_tests {
     use std::time::Instant;
 
-    use crate::utils::backoff::{Backoff_, RoomAcquireError, Rooms};
+    use crate::utils::backoff::{Backoff_, Rooms};
 
     const ROOM_1: i32 = 1;
     const ROOM_2: i32 = 2;

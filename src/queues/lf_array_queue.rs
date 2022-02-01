@@ -30,13 +30,14 @@ impl<T> StorageSlot<T> {
 ///An array based queue with no blocking (unlike the rooms in the rooms_array_queue)
 ///! Source:
 ///!   - <http://www.1024cores.net/home/lock-free-algorithms/queues/bounded-mpmc-queue>
-/// This implementation is also based on - <https://github.com/crossbeam-rs/crossbeam/blob/master/crossbeam-queue/src/array_queue.rs>
+/// This implementation is based on -
+/// <https://github.com/crossbeam-rs/crossbeam/blob/master/crossbeam-queue/src/array_queue.rs>
 /// But we alter it by adding a safe dump() method which attempts to dump a lot of
 /// Items contained in the queue at a time to improve performance in mpsc scenarios like batching
 pub struct LFBQueue<T> {
     head: CachePadded<AtomicUsize>,
     tail: CachePadded<AtomicUsize>,
-    array: Box<Vec<StorageSlot<T>>>,
+    array: Box<[StorageSlot<T>]>,
     capacity: usize,
     one_lap: usize,
 }
@@ -45,19 +46,16 @@ unsafe impl<T: Send> Sync for LFBQueue<T> {}
 
 impl<T> LFBQueue<T> {
     pub fn new(capacity: usize) -> Self {
-
-        let mut array = Box::new(Vec::with_capacity(capacity));
-
-        for i in 0..capacity {
-            array.push(StorageSlot::new(i));
-        }
+        let buffer: Box<[StorageSlot<T>]> = (0..capacity)
+            .map(|i| { StorageSlot::new(i) })
+            .collect();
 
         let one_lap = (capacity + 1).next_power_of_two();
 
         Self {
             head: CachePadded::new(AtomicUsize::new(0)),
             tail: CachePadded::new(AtomicUsize::new(0)),
-            array,
+            array: buffer,
             one_lap,
             capacity,
         }
@@ -338,7 +336,7 @@ impl<T> BQueue<T> for LFBQueue<T> where T: Debug {
 
                 //If the slot stamp == tail, it's the current slot we want to write to
                 if slot_stamp == tail {
-                    let new_tail = if tail_index + 1< self.capacity {
+                    let new_tail = if tail_index + 1 < self.capacity {
                         tail + 1
                     } else {
                         //Add one lap to the tail lap
@@ -446,7 +444,7 @@ impl<T> BQueue<T> for LFBQueue<T> where T: Debug {
                         //We block here until there is a member available to be popped
                         backoff.snooze();
 
-                        continue 'outer
+                        continue 'outer;
                     }
 
                     //Wait for the thread to finish reading the value and then try again to read a value
@@ -463,5 +461,27 @@ impl<T> BQueue<T> for LFBQueue<T> where T: Debug {
 
     fn dump_blk(&self, count: usize) -> Vec<T> {
         todo!()
+    }
+}
+
+impl<T> Drop for LFBQueue<T> {
+    fn drop(&mut self) {
+        let head_index = self.extract_index_of(self.head.load(Relaxed));
+
+        // Loop over all items currently in the queue and drop them.
+        for i in 0..self.size() {
+            // Compute the index of the next slot holding a message.
+            let index = if head_index + i < self.capacity() {
+                head_index + i
+            } else {
+                head_index + i - self.capacity()
+            };
+
+            unsafe {
+                let slot = self.array.get_unchecked_mut(index);
+                let value = &mut *slot.value.get();
+                value.as_mut_ptr().drop_in_place();
+            }
+        }
     }
 }

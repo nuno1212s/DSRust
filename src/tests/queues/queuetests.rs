@@ -14,8 +14,8 @@ impl Queue<u32> for ArrayQueue<u32> {
             Ok(_) => {
                 Ok(())
             }
-            Err(_) => {
-                Err(QueueError::QueueFull { 0: elem })
+            Err(e) => {
+                Err(QueueError::QueueFull { 0: e })
             }
         }
     }
@@ -25,15 +25,21 @@ impl Queue<u32> for ArrayQueue<u32> {
     }
 
     fn dump(&self, vec: &mut Vec<u32>) -> Result<usize, QueueError<u32>> {
-        todo!()
+        match self.pop() {
+            None => { Ok(0) }
+            Some(ele) => {
+                vec.push(ele);
+
+                Ok(1)
+            }
+        }
     }
 }
 
 #[cfg(test)]
 pub mod queue_tests {
     use std::sync::Arc;
-    use std::thread::sleep;
-    use std::time::{Duration, Instant};
+    use std::time::{Instant};
 
     use crossbeam_queue::ArrayQueue;
 
@@ -91,61 +97,6 @@ pub mod queue_tests {
         }
 
         assert_eq!(current, count + 1);
-    }
-
-    fn test_spsc_crossbeam(capacity: usize, operation_count: u32) {
-        let queue = ArrayQueue::new(capacity);
-
-        let queue_arc = Arc::new(queue);
-
-        let queue_prod = queue_arc.clone();
-
-        let producer_handle = std::thread::spawn(move || {
-
-            //producer thread
-            let mut current = 0;
-            let mut count = 0;
-
-            loop {
-                if count > operation_count {
-                    break;
-                }
-
-                match queue_prod.push(current) {
-                    Ok(_) => {
-                        current = (current + 1) % capacity as u32;
-                        count += 1;
-                    }
-                    Err(_) => {}
-                };
-            }
-        });
-
-        let start = Instant::now();
-
-        //consumer thread
-        let mut current = 0;
-        let mut count = 0;
-
-        loop {
-            if count > operation_count {
-                break;
-            }
-
-            let popped_opt = queue_arc.pop();
-
-            match popped_opt {
-                None => {}
-                Some(popped) => {
-                    assert_eq!(popped, current);
-
-                    current = (current + 1) % capacity as u32;
-                    count = count + 1;
-                }
-            }
-        }
-
-        println!("Performed all remove operations in {} millis", start.elapsed().as_millis());
     }
 
     fn test_spsc<T>(queue: T, capacity: usize, operation_count: u32) where T: Queue<u32> + Send + Sync + 'static {
@@ -319,39 +270,22 @@ pub mod queue_tests {
             });
         }
 
-
         let start = Instant::now();
 
         //consumer thread
         let mut count = 0;
-
-        let mut vec = Vec::with_capacity(capacity);
-
-        let mut ops = 0;
 
         loop {
             if count >= operations {
                 break;
             }
 
-            let popped = queue_arc.dump(&mut vec);
+            let popped = queue_arc.pop_blk();
 
-            vec.clear();
-
-            match popped {
-                Ok(size) => {
-                    count += size;
-                    ops += 1;
-                }
-                Err(e) => {
-                    println!("ERROR {}", e);
-                }
-            }
+            count += 1;
         }
 
         let i = start.elapsed().as_millis();
-
-        println!("Performed all remove operations in {} millis removed an average of {} at a time", i, (count / ops));
     }
 
     #[test]
@@ -399,7 +333,7 @@ pub mod queue_tests {
 
         println!("Testing crossbeam");
 
-        test_spsc_crossbeam(limit, operations);
+        test_spsc(ArrayQueue::new(limit), limit, operations);
     }
 
     #[test]
@@ -426,15 +360,16 @@ pub mod queue_tests {
         test_spsc(MQueue::new(limit, false), limit, operations);
 
         println!("Testing crossbeam");
-        test_spsc_crossbeam(limit, operations);
+        test_spsc(ArrayQueue::new(limit), limit, operations);
     }
 
     #[test]
     fn test_mpsc() {
         let capacity = 1000;
-        let operations = 1500000;
+        let operations = 3200000;
 
-        let producer_threads = 15;
+        let producer_threads = 32;
+
         println!("Testing blocking queues multiple producer single consumer");
 
         println!("Testing LFRoomArrayQueue");

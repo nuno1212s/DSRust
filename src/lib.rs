@@ -3,12 +3,14 @@
 pub mod tests {
     pub mod queues {
         pub mod queuetests;
+        pub mod queuebench;
     }
 }
 
 pub mod utils {
     pub mod backoff;
     pub mod memory_access;
+    pub mod benchmark;
 }
 
 pub mod queues {
