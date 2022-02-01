@@ -2,12 +2,9 @@ use std::cell::Cell;
 use std::cmp::min;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use std::ops::Deref;
-use std::sync::{Condvar, Mutex, MutexGuard, TryLockResult};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::atomic::Ordering::Relaxed;
 use std::thread;
-use std::thread::sleep;
 use std::time::Duration;
 
 use crossbeam_utils::Backoff;
@@ -26,7 +23,7 @@ pub struct Backoff_ {}
 impl Backoff_ {
     pub fn backoff_return_time() -> Duration {
         CURRENT_BACKOFF.with(|f| {
-            let mut current_backoff = f.get();
+            let current_backoff = f.get();
 
             let sleep_dur = fastrand::u64(0..current_backoff);
 
@@ -46,7 +43,7 @@ impl Backoff_ {
 
     pub fn backoff() {
         CURRENT_BACKOFF.with(|f| {
-            let mut current_backoff = f.get();
+            let current_backoff = f.get();
 
             let sleep_dur = fastrand::u64(0..current_backoff);
 

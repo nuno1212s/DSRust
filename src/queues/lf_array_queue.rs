@@ -458,10 +458,6 @@ impl<T> BQueue<T> for LFBQueue<T> where T: Debug {
             }
         }
     }
-
-    fn dump_blk(&self, count: usize) -> Vec<T> {
-        todo!()
-    }
 }
 
 impl<T> Drop for LFBQueue<T> {

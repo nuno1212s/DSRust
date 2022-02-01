@@ -1,11 +1,8 @@
 use std::fmt::Debug;
-use std::sync::{Condvar, Mutex, TryLockResult};
-use std::sync::atomic::{AtomicI64, Ordering};
 
 use crossbeam_utils::Backoff;
-
+use parking_lot::{Condvar, Mutex};
 use crate::queues::queues::{BQueue, Queue, QueueError, SizableQueue};
-use crate::utils::backoff;
 
 struct QueueData<T> {
     array: Vec<Option<T>>,
@@ -79,17 +76,17 @@ impl<T> SizableQueue for MQueue<T> {
                 let result = self.array.try_lock();
 
                 match result {
-                    Ok(lock_guard) => {
+                    Some(lock_guard) => {
                         return lock_guard.size();
                     }
 
-                    Err(_) => {}
+                    None => {}
                 }
 
                 backoff.spin();
             }
         } else {
-            let guard = self.array.lock().unwrap();
+            let guard = self.array.lock();
 
             return guard.size();
         }
@@ -105,7 +102,7 @@ impl<T> Queue<T> for MQueue<T> where T: Debug {
                 let lock_res = self.array.try_lock();
 
                 match lock_res {
-                    Ok(mut lock_guard) => {
+                    Some(mut lock_guard) => {
                         //We increment and then decrement in case it overflows because most of the time we
                         //Assume the operation is going to be completed successfully, so
                         //The size will not need to be decremented, so a single item is fine
@@ -119,7 +116,7 @@ impl<T> Queue<T> for MQueue<T> where T: Debug {
 
                         lock_guard.size += 1;
 
-                        let mut vector = lock_guard.array();
+                        let vector = lock_guard.array();
 
                         let index = (head + size) as usize % self.capacity();
 
@@ -130,7 +127,7 @@ impl<T> Queue<T> for MQueue<T> where T: Debug {
 
                         break;
                     }
-                    Err(_er) => {}
+                    None => {}
                 }
 
                 backoff.spin();
@@ -138,7 +135,7 @@ impl<T> Queue<T> for MQueue<T> where T: Debug {
 
             Ok(())
         } else {
-            let mut lock_guard = self.array.lock().unwrap();
+            let mut lock_guard = self.array.lock();
 
             let size = lock_guard.size();
 
@@ -166,10 +163,10 @@ impl<T> Queue<T> for MQueue<T> where T: Debug {
             let backoff = Backoff::new();
 
             loop {
-                let mut lock_result = self.array.try_lock();
+                let lock_result = self.array.try_lock();
 
                 match lock_result {
-                    Ok(mut lock_guard) => {
+                    Some(mut lock_guard) => {
 
                         //We increment and then decrement in case it overflows because most of the time we
                         //Assume the operation is going to be completed successfully, so
@@ -191,13 +188,13 @@ impl<T> Queue<T> for MQueue<T> where T: Debug {
 
                         return elem;
                     }
-                    Err(_er) => {}
+                    None => {}
                 }
 
                 backoff.spin();
             }
         } else {
-            let mut lock_guard = self.array.lock().unwrap();
+            let mut lock_guard = self.array.lock();
 
             let size = lock_guard.size();
 
@@ -230,7 +227,7 @@ impl<T> Queue<T> for MQueue<T> where T: Debug {
 
             loop {
                 match self.array.try_lock() {
-                    Ok(mut lock_guard) => {
+                    Some(mut lock_guard) => {
                         let size = lock_guard.size();
 
                         if size <= 0 {
@@ -257,13 +254,13 @@ impl<T> Queue<T> for MQueue<T> where T: Debug {
 
                         return Ok(to_remove);
                     }
-                    Err(_) => {}
+                    None => {}
                 }
 
                 backoff.spin();
             }
         } else {
-            let mut lock_guard = self.array.lock().unwrap();
+            let mut lock_guard = self.array.lock();
 
             let size = lock_guard.size();
 
@@ -299,10 +296,10 @@ impl<T> BQueue<T> for MQueue<T> where T:Debug{
             let backoff = Backoff::new();
 
             loop {
-                let mut lock_res = self.array.try_lock();
+                let lock_res = self.array.try_lock();
 
                 match lock_res {
-                    Ok(mut lock_guard) => {
+                    Some(mut lock_guard) => {
                         let size = lock_guard.size();
 
                         if size >= self.capacity() {
@@ -322,18 +319,18 @@ impl<T> BQueue<T> for MQueue<T> where T:Debug{
                         drop(lock_guard);
                         break;
                     }
-                    Err(_er) => {}
+                    None => {}
                 }
 
                 backoff.spin();
             }
         } else {
-            let mut lock_guard = self.array.lock().unwrap();
+            let mut lock_guard = self.array.lock();
 
             let mut size = lock_guard.size();
 
             while size >= self.capacity() {
-                lock_guard = self.full_notifier.wait(lock_guard).unwrap();
+                self.full_notifier.wait(&mut lock_guard);
 
                 size = lock_guard.size();
             }
@@ -356,10 +353,10 @@ impl<T> BQueue<T> for MQueue<T> where T:Debug{
             let backoff = Backoff::new();
 
             loop {
-                let mut lock_result = self.array.try_lock();
+                let lock_result = self.array.try_lock();
 
                 match lock_result {
-                    Ok(mut lock_guard) => {
+                    Some(mut lock_guard) => {
                         let size = lock_guard.size();
 
                         if size <= 0 {
@@ -382,13 +379,13 @@ impl<T> BQueue<T> for MQueue<T> where T:Debug{
                         return elem.unwrap();
                     }
 
-                    Err(_er) => {}
+                   None => {}
                 }
 
                 backoff.spin();
             }
         } else {
-            let mut lock_guard = self.array.lock().unwrap();
+            let mut lock_guard = self.array.lock();
 
             //We increment and then decrement in case it overflows because most of the time we
             //Assume the operation is going to be completed successfully, so
@@ -396,7 +393,7 @@ impl<T> BQueue<T> for MQueue<T> where T:Debug{
             let mut size = lock_guard.size();
 
             while size <= 0 {
-                lock_guard = self.empty_notifier.wait(lock_guard).unwrap();
+                self.empty_notifier.wait(&mut lock_guard);
 
                 size = lock_guard.size();
             }
@@ -414,9 +411,5 @@ impl<T> BQueue<T> for MQueue<T> where T:Debug{
 
             result.unwrap()
         }
-    }
-
-    fn dump_blk(&self, count: usize) -> Vec<T> {
-        todo!()
     }
 }

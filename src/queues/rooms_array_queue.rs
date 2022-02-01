@@ -1,13 +1,11 @@
-use std::cell::UnsafeCell;
 use std::fmt::Debug;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::atomic::Ordering::Relaxed;
 
 use crossbeam_utils::{Backoff, CachePadded};
 
 use crate::queues::queues::{BQueue, Queue, QueueError, SizableQueue};
 use crate::queues::queues::QueueError::MalformedInputVec;
-use crate::utils::backoff;
 use crate::utils::backoff::Rooms;
 use crate::utils::memory_access::UnsafeWrapper;
 
@@ -246,58 +244,5 @@ impl<T> BQueue<T> for LFBRArrayQueue<T> where T: Debug {
         }
 
         return t;
-    }
-
-    fn dump_blk(&self, count: usize) -> Vec<T> {
-        todo!();
-        //Pre allocate the vector to limit to the max the
-        //amount of time we will spend in the critical section
-        let mut new_vec = Vec::with_capacity(count);
-
-        let mut left_to_collect = count;
-
-        let backoff = Backoff::new();
-
-        loop {
-            self.rooms.enter_blk(REM_ROOM);
-
-            let mut last_element = self.tail.load(Ordering::SeqCst);
-
-            let prev_head = self.head.swap(last_element, Ordering::SeqCst);
-
-            let mut count = last_element - prev_head;
-
-            if count > 0 {
-                if count > left_to_collect {
-                    let excess = count - left_to_collect;
-
-                    //rewind the uncollected
-                    self.head.fetch_sub(excess, Ordering::SeqCst);
-
-                    last_element -= excess;
-
-                    count = left_to_collect;
-                }
-
-                left_to_collect -= count;
-
-                unsafe {
-                    let x = &mut *self.array.get();
-
-                    //Move the values into the new vector
-                    for pos in prev_head..last_element {
-                        new_vec.push(x.get_mut(pos as usize).unwrap().take().unwrap());
-                    }
-                }
-            }
-
-            self.rooms.leave_blk(REM_ROOM);
-
-            if left_to_collect <= 0 {
-                return new_vec;
-            }
-
-            backoff.snooze();
-        }
     }
 }

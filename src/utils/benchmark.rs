@@ -1,7 +1,6 @@
 use std::cmp::max;
 use std::ops::Add;
 use std::sync::Mutex;
-use std::thread::Thread;
 use std::time::{Duration, Instant};
 
 pub struct ThreadBench {

@@ -104,7 +104,7 @@ pub mod queue_tests {
 
         let queue_prod = queue_arc.clone();
 
-        let producer_handle = std::thread::spawn(move || {
+        let _producer_handle = std::thread::spawn(move || {
 
             //producer thread
             let mut current = 0;
@@ -155,7 +155,7 @@ pub mod queue_tests {
 
         let queue_prod = queue_arc.clone();
 
-        let producer_handle = std::thread::spawn(move || {
+        let _producer_handle = std::thread::spawn(move || {
 
             //producer thread
             let mut current = 0;
@@ -232,7 +232,7 @@ pub mod queue_tests {
                 break;
             }
 
-            let popped = match queue_arc.pop() {
+            match queue_arc.pop() {
                 None => {}
                 Some(_) => {
                     count = count + 1;
@@ -280,12 +280,10 @@ pub mod queue_tests {
                 break;
             }
 
-            let popped = queue_arc.pop_blk();
+            let _popped = queue_arc.pop_blk();
 
             count += 1;
         }
-
-        let i = start.elapsed().as_millis();
     }
 
     #[test]

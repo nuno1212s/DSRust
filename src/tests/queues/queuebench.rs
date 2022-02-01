@@ -56,7 +56,7 @@ pub mod queue_bench {
                 break;
             }
 
-            let popped = queue_arc.pop_blk();
+            let _popped = queue_arc.pop_blk();
 
             count += 1;
             current_bench.iter_count();
@@ -65,7 +65,7 @@ pub mod queue_bench {
         bencher.register_results(current_bench.iter_end());
 
         for x in threads {
-            x.join();
+            x.join().unwrap();
         }
     }
 

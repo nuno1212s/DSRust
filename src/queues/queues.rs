@@ -14,11 +14,6 @@ pub trait BQueue<T>: SizableQueue where T: Debug {
     ///Pop the first element in the queue
     /// Will block if the queue is empty until there is an element
     fn pop_blk(&self) -> T;
-
-    /// Dump the first count elements from the queue
-    /// If the queue has less than count elements it will block until
-    /// it has finished getting all the elements
-    fn dump_blk(&self, count: usize) -> Vec<T>;
 }
 
 ///FIFO non blocking queue trait
