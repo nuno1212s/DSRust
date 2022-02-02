@@ -211,7 +211,7 @@ impl Rooms {
         self.room_count
     }
 
-    fn change_state_blk<F>(&self, apply: F, room: i32) where F: FnOnce(&State, i32) -> State + Copy {
+    fn change_state_blk<F>(&self, apply: F, room: i32, success_ordering: Ordering) where F: FnOnce(&State, i32) -> State + Copy {
         let backoff = Backoff::new();
 
         let mut x = self.state.load(Ordering::Relaxed);
@@ -227,7 +227,7 @@ impl Rooms {
 
                         x = self.state.load(Relaxed);
 
-                        continue
+                        continue;
                     }
                 }
             }
@@ -235,8 +235,8 @@ impl Rooms {
             let new_state = apply.call_once((&state, room));
 
             match self.state.compare_exchange_weak(x, new_state.to_stored_state(),
-                                              Ordering::SeqCst,
-                                              Ordering::Relaxed) {
+                                                   success_ordering,
+                                                   Ordering::Relaxed) {
                 Ok(_state) => {
                     break;
                 }
@@ -249,7 +249,7 @@ impl Rooms {
         }
     }
 
-    fn change_state<F>(&self, apply: F, room: i32) -> Result<(), RoomAcquireError> where F: FnOnce(&State, i32) -> State + Copy {
+    fn change_state<F>(&self, apply: F, room: i32, success_ordering: Ordering) -> Result<(), RoomAcquireError> where F: FnOnce(&State, i32) -> State + Copy {
         let x = self.state.load(Ordering::Relaxed);
 
         let state = State::from_stored_state(x);
@@ -266,8 +266,8 @@ impl Rooms {
         let new_state = apply.call_once((&state, room));
 
         return match self.state.compare_exchange_weak(x, new_state.to_stored_state(),
-                                                 Ordering::SeqCst,
-                                                 Ordering::Relaxed) {
+                                                      success_ordering,
+                                                      Ordering::Relaxed) {
             Ok(_state) => {
                 Ok(())
             }
@@ -277,41 +277,64 @@ impl Rooms {
         };
     }
 
+    ///Attempt to enter the given room
+    ///This will use the success ordering of Relaxed
     pub fn enter_blk(&self, room: i32) -> Result<(), RoomAcquireError> {
+        self.enter_blk_ordered(room, Relaxed)
+    }
+
+    ///Attempt to enter the given room using the provided success memory ordering
+    pub fn enter_blk_ordered(&self, room: i32, success_ordering: Ordering) -> Result<(), RoomAcquireError> {
         if room <= 0 || room > self.room_count() as i32 {
             return Err(RoomAcquireError::NoRoom);
         }
 
-        self.change_state_blk(State::enter, room);
+        self.change_state_blk(State::enter, room, success_ordering);
 
         Ok(())
     }
 
+    ///Attempt to leave the given room
+    ///This will use the success ordering of Relaxed
     pub fn leave_blk(&self, room: i32) -> Result<(), RoomAcquireError> {
+        self.leave_blk_ordered(room, Relaxed)
+    }
+
+    ///Attempt to leave the given room using the provided success memory ordering
+    pub fn leave_blk_ordered(&self, room: i32, success_ordering: Ordering) -> Result<(), RoomAcquireError> {
         if room <= 0 || room > self.room_count() as i32 {
             return Err(RoomAcquireError::NoRoom);
         }
 
-        self.change_state_blk(State::leave, room);
+        self.change_state_blk(State::leave, room, success_ordering);
 
         Ok(())
     }
 
     pub fn enter(&self, room: i32) -> Result<(), RoomAcquireError> {
+        self.enter_ordered(room, Relaxed)
+    }
+
+    pub fn enter_ordered(&self, room: i32, success_ordering: Ordering)-> Result<(), RoomAcquireError> {
         if room <= 0 || room > self.room_count() as i32 {
             return Err(RoomAcquireError::NoRoom);
         }
 
-        return self.change_state(State::enter, room);
+        return self.change_state(State::enter, room, success_ordering);
     }
 
     pub fn leave(&self, room: i32) -> Result<(), RoomAcquireError> {
+        self.leave_ordered(room, Relaxed)
+    }
+
+    pub fn leave_ordered(&self, room: i32, success_ordering: Ordering) -> Result<(), RoomAcquireError> {
         if room <= 0 || room > self.room_count() as i32 {
             return Err(RoomAcquireError::NoRoom);
         }
 
-        return self.change_state(State::leave, room);
+        return self.change_state(State::leave, room, success_ordering);
     }
+
 }
 
 #[derive(Debug)]

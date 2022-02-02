@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::Ordering::{Acquire, Relaxed};
 
 use crossbeam_utils::{Backoff, CachePadded};
 
@@ -51,16 +51,30 @@ impl<T> LFBRArrayQueue<T> {
 
 impl<T> SizableQueue for LFBRArrayQueue<T> {
     fn size(&self) -> usize {
-        self.rooms.enter_blk(SIZE_ROOM);
+        //We use acquire because we want to get the latest values from the other threads, but we won't change anything
+        //So the store part can be Relaxed
+        self.rooms.enter_blk_ordered(SIZE_ROOM, Ordering::Acquire).expect("Failed to enter room?");
 
         let size = self.tail.load(Ordering::SeqCst) - self.head.load(Ordering::SeqCst);
 
-        self.rooms.leave_blk(SIZE_ROOM);
+        //Since we perform no changes, we can leave using the relaxed state
+        self.rooms.leave_blk(SIZE_ROOM).expect("Failed to exit room");
 
         size
     }
 }
 
+///The non blocking queue implementation
+///We only use relaxed operations for every atomic access/modification
+///Because we have the rooms implementation. Rooms works as follows: Any n users can be inside a room
+/// But there can only be one room occupied at a time
+///Since there can only be one room occupied at a time, we know that we can either have n writers or n readers,
+/// never both. Writers do not need to see the changes that are being made by other writers since
+/// Each writer has his own slot for writing that will not interfere with other writers
+/// We only need memory synchronization when we are moving from readers to writers and vice-versa
+/// So, by using Acquire when entering the room and release when leaving the rooms,
+/// We know for a fact that readers will have access to all changes performed by writers and vice versa
+/// And we have relaxed the memory barriers to improve performance
 impl<T> Queue<T> for LFBRArrayQueue<T> where T: Debug {
     fn enqueue(&self, elem: T) -> Result<(), QueueError<T>> {
         if self.is_full.load(Ordering::Relaxed) {
@@ -70,12 +84,16 @@ impl<T> Queue<T> for LFBRArrayQueue<T> where T: Debug {
             return Result::Err(QueueError::QueueFull { 0: elem });
         }
 
-        self.rooms.enter_blk(ADD_ROOM);
+        //Enter the room using acquire as we want all changes done before we have entered
+        //The room to be propagated into this thread
+        self.rooms.enter_blk_ordered(ADD_ROOM, Ordering::Acquire).expect("Failed to enter room?");
 
-        let prev_tail = self.tail.fetch_add(1, Ordering::SeqCst);
+        //Claim the spot we want to add to as ours
+        let prev_tail = self.tail.fetch_add(1, Ordering::Relaxed);
 
         let head = self.head.load(Ordering::Relaxed);
 
+        //We have not exceeded capacity so we can still add the value
         if prev_tail - head < self.capacity() {
             unsafe {
                 let array_mut = &mut *self.array.get();
@@ -89,14 +107,17 @@ impl<T> Queue<T> for LFBRArrayQueue<T> where T: Debug {
                 self.is_full.store(true, Ordering::Relaxed);
             }
 
-            self.rooms.leave_blk(ADD_ROOM);
+            //Leave the room using release as we don't want to receive memory updates from other threads
+            //But we do want other threads to receive the updates we have written
+            self.rooms.leave_blk_ordered(ADD_ROOM, Ordering::Release).expect("Failed to exit room");
 
             return Result::Ok(());
         }
 
-        self.tail.fetch_sub(1, Ordering::SeqCst);
+        self.tail.fetch_sub(1, Ordering::Relaxed);
 
-        self.rooms.leave_blk(ADD_ROOM);
+        //Since we have written nothing, we don't have to synchronize our memory with anyone
+        self.rooms.leave_blk_ordered(ADD_ROOM, Ordering::Relaxed);
 
         Err(QueueError::QueueFull { 0: elem })
     }
@@ -104,12 +125,13 @@ impl<T> Queue<T> for LFBRArrayQueue<T> where T: Debug {
     fn pop(&self) -> Option<T> {
         let t: T;
 
-        self.rooms.enter_blk(REM_ROOM);
+        //Acquire the operations performed by other threads before we have entered the room
+        self.rooms.enter_blk_ordered(REM_ROOM, Ordering::Acquire);
 
         //Claim the spot that we want to remove
-        let prev_head = self.head.fetch_add(1, Ordering::SeqCst);
+        let prev_head = self.head.fetch_add(1, Ordering::Relaxed);
 
-        if prev_head < self.tail.load(Ordering::SeqCst) {
+        if prev_head < self.tail.load(Ordering::Relaxed) {
             let pos = prev_head % self.capacity();
 
             unsafe {
@@ -118,9 +140,10 @@ impl<T> Queue<T> for LFBRArrayQueue<T> where T: Debug {
                 t = array_mut.get_mut(pos).unwrap().take().unwrap();
             }
 
-            self.is_full.store(false, Ordering::Relaxed);
+            //Register all our changes into other threads
+            self.rooms.leave_blk_ordered(REM_ROOM, Ordering::Release);
 
-            self.rooms.leave_blk(REM_ROOM);
+            self.is_full.store(false, Ordering::Relaxed);
 
             Some(t)
         } else {
@@ -138,12 +161,13 @@ impl<T> Queue<T> for LFBRArrayQueue<T> where T: Debug {
             return Err(MalformedInputVec);
         }
 
-        self.rooms.enter_blk(REM_ROOM);
+        //Acquire the
+        self.rooms.enter_blk_ordered(REM_ROOM, Ordering::Acquire);
 
         //Since we are in a remove room we know the tail is not going to be altered
         let current_tail = self.tail.load(Ordering::Relaxed);
 
-        let prev_head = self.head.swap(current_tail, Ordering::SeqCst);
+        let prev_head = self.head.swap(current_tail, Ordering::Relaxed);
 
         let count = current_tail - prev_head;
 
@@ -179,10 +203,16 @@ impl<T> BQueue<T> for LFBRArrayQueue<T> where T: Debug {
                 continue;
             }
 
-            self.rooms.enter_blk(ADD_ROOM);
+            self.rooms.enter_blk_ordered(ADD_ROOM, Ordering::Acquire);
 
-            let prev_tail = self.tail.fetch_add(1, Ordering::SeqCst);
+            //Claim the spot we want to add to as ours
+            //Use Release since we want the modifications made to the array to be visible to
+            //Readers, not particularly writers (As in we don't need to know the updated state of the
+            //Previous writer, since we aren't going to be accessing that memory anyways)
+            let prev_tail = self.tail.fetch_add(1, Ordering::Relaxed);
 
+            //Use acquire to perform acquire-release ordering with the previous reader,
+            //So we have access to the modifications the previous reader did to the memory
             let head = self.head.load(Ordering::Relaxed);
 
             if prev_tail - head < self.capacity() {
@@ -192,7 +222,7 @@ impl<T> BQueue<T> for LFBRArrayQueue<T> where T: Debug {
                     array_mut.get_mut(prev_tail as usize % self.capacity()).unwrap().insert(elem);
                 }
 
-                self.rooms.leave_blk(ADD_ROOM);
+                self.rooms.leave_blk_ordered(ADD_ROOM, Ordering::Release);
 
                 //In case the element we have inserted is the last one,
                 //Close the door behind us
@@ -203,9 +233,10 @@ impl<T> BQueue<T> for LFBRArrayQueue<T> where T: Debug {
                 break;
             }
 
-            self.tail.fetch_sub(1, Ordering::SeqCst);
+            self.tail.fetch_sub(1, Ordering::Relaxed);
 
-            self.rooms.leave_blk(ADD_ROOM);
+            //We do not write anything so we don't have to synchronize any memory
+            self.rooms.leave_blk_ordered(ADD_ROOM, Ordering::Relaxed);
 
             backoff.snooze();
         }
@@ -216,9 +247,9 @@ impl<T> BQueue<T> for LFBRArrayQueue<T> where T: Debug {
         let backoff = Backoff::new();
 
         loop {
-            self.rooms.enter_blk(REM_ROOM);
+            self.rooms.enter_blk_ordered(REM_ROOM, Ordering::Acquire);
 
-            let prev_head = self.head.fetch_add(1, Ordering::SeqCst);
+            let prev_head = self.head.fetch_add(1, Ordering::Relaxed);
 
             if prev_head < self.tail.load(Ordering::Relaxed) {
                 let pos = prev_head % self.capacity();
@@ -231,13 +262,13 @@ impl<T> BQueue<T> for LFBRArrayQueue<T> where T: Debug {
 
                 self.is_full.store(false, Ordering::Relaxed);
 
-                self.rooms.leave_blk(REM_ROOM);
+                self.rooms.leave_blk_ordered(REM_ROOM, Ordering::Release);
 
                 break;
             } else {
                 self.head.fetch_sub(1, Ordering::Relaxed);
 
-                self.rooms.leave_blk(REM_ROOM);
+                self.rooms.leave_blk_ordered(REM_ROOM, Ordering::Relaxed);
 
                 backoff.snooze();
             }
