@@ -182,9 +182,12 @@ impl<T> Queue<T> for LFBRArrayQueue<T> where T: Debug {
             }
 
             self.is_full.store(false, Relaxed);
+
+            self.rooms.leave_blk_ordered(REM_ROOM, Ordering::Release);
+        } else {
+            self.rooms.leave_blk_ordered(REM_ROOM, Ordering::Relaxed);
         }
 
-        self.rooms.leave_blk(REM_ROOM);
 
         return Ok(count);
     }
