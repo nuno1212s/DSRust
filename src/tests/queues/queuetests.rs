@@ -6,6 +6,10 @@ impl SizableQueue for ArrayQueue<u32> {
     fn size(&self) -> usize {
         self.len()
     }
+
+    fn capacity(&self) -> Option<usize> {
+        Some(self.capacity())
+    }
 }
 
 impl Queue<u32> for ArrayQueue<u32> {

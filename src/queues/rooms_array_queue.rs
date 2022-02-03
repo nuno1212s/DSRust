@@ -1,13 +1,13 @@
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::atomic::Ordering::{Acquire, Relaxed};
+use std::sync::atomic::Ordering::{Relaxed};
 
 use crossbeam_utils::{Backoff, CachePadded};
 
 use crate::queues::queues::{BQueue, Queue, QueueError, SizableQueue};
 use crate::queues::queues::QueueError::MalformedInputVec;
-use crate::utils::backoff::Rooms;
 use crate::utils::memory_access::UnsafeWrapper;
+use crate::utils::rooms::Rooms;
 
 const SIZE_ROOM: i32 = 1;
 const ADD_ROOM: i32 = 2;
@@ -61,6 +61,10 @@ impl<T> SizableQueue for LFBRArrayQueue<T> {
         self.rooms.leave_blk(SIZE_ROOM).expect("Failed to exit room");
 
         size
+    }
+
+    fn capacity(&self) -> Option<usize> {
+        Some(self.capacity)
     }
 }
 

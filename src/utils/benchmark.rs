@@ -20,6 +20,10 @@ impl CurrentBench {
         self.current_iteration_count += 1;
     }
 
+    pub fn iter_count_mult(&mut self, amount: u128) {
+        self.current_iteration_count += amount;
+    }
+
     pub fn iter_end(self) -> ThreadBench {
         let duration = Instant::now().duration_since(self.start_time);
 

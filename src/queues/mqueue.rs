@@ -91,6 +91,10 @@ impl<T> SizableQueue for MQueue<T> {
             return guard.size();
         }
     }
+
+    fn capacity(&self) -> Option<usize> {
+        Some(self.capacity)
+    }
 }
 
 impl<T> Queue<T> for MQueue<T> where T: Debug {

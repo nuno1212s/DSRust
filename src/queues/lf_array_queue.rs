@@ -110,6 +110,10 @@ impl<T> SizableQueue for LFBQueue<T> {
             }
         }
     }
+
+    fn capacity(&self) -> Option<usize> {
+        Some(self.capacity)
+    }
 }
 
 ///Non blocking implementation for ArrayBQueue

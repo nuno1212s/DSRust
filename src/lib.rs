@@ -5,12 +5,17 @@ pub mod tests {
         pub mod queuetests;
         pub mod queuebench;
     }
+
+    pub mod utils {
+        pub mod roomsbench;
+    }
 }
 
 pub mod utils {
     pub mod backoff;
     pub mod memory_access;
     pub mod benchmark;
+    pub mod rooms;
 }
 
 pub mod queues {

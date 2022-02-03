@@ -3,6 +3,8 @@ use std::fmt::{Debug, Display, Formatter};
 
 pub trait SizableQueue {
     fn size(&self) -> usize;
+
+    fn capacity(&self) -> Option<usize>;
 }
 
 /// FIFO blocking queue trait
