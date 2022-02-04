@@ -4,6 +4,7 @@ pub mod tests {
     pub mod queues {
         pub mod queuetests;
         pub mod queuebench;
+        pub mod channelbench;
     }
 
     pub mod utils {
@@ -23,4 +24,8 @@ pub mod queues {
     pub mod queues;
     pub mod mqueue;
     pub mod lf_array_queue;
+}
+
+pub mod channels {
+    pub mod queue_channel;
 }

@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::atomic::Ordering::{Relaxed};
+use std::sync::atomic::Ordering::{Acquire, Relaxed};
 
 use crossbeam_utils::{Backoff, CachePadded};
 
@@ -53,18 +53,39 @@ impl<T> SizableQueue for LFBRArrayQueue<T> {
     fn size(&self) -> usize {
         //We use acquire because we want to get the latest values from the other threads, but we won't change anything
         //So the store part can be Relaxed
-        self.rooms.enter_blk_ordered(SIZE_ROOM, Ordering::Acquire).expect("Failed to enter room?");
+        self.rooms.enter_blk_ordered(SIZE_ROOM, Ordering::Relaxed).expect("Failed to enter room?");
 
-        let size = self.tail.load(Ordering::SeqCst) - self.head.load(Ordering::SeqCst);
+        let size = self.tail.load(Ordering::Relaxed) - self.head.load(Ordering::Relaxed);
 
         //Since we perform no changes, we can leave using the relaxed state
-        self.rooms.leave_blk(SIZE_ROOM).expect("Failed to exit room");
+        self.rooms.leave_blk_ordered(SIZE_ROOM, Ordering::Relaxed).expect("Failed to exit room");
 
         size
     }
 
     fn capacity(&self) -> Option<usize> {
         Some(self.capacity)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.rooms.enter_blk_ordered(SIZE_ROOM, Ordering::Relaxed);
+
+        let size = self.tail.load(Ordering::Relaxed) - self.head.load(Ordering::Relaxed);
+
+        //Since we perform no changes, we can leave using the relaxed state
+        self.rooms.leave_blk_ordered(SIZE_ROOM, Ordering::Relaxed).expect("Failed to exit room");
+
+        size == 0
+    }
+
+    fn is_full(&self) -> bool {
+        self.rooms.enter_blk_ordered(SIZE_ROOM, Ordering::Relaxed);
+
+        let size = self.tail.load(Ordering::Relaxed) - self.head.load(Ordering::Relaxed);
+
+        self.rooms.leave_blk_ordered(SIZE_ROOM, Ordering::Relaxed);
+
+        size == self.capacity()
     }
 }
 

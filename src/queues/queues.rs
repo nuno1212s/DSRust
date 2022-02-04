@@ -5,6 +5,10 @@ pub trait SizableQueue {
     fn size(&self) -> usize;
 
     fn capacity(&self) -> Option<usize>;
+
+    fn is_empty(&self) -> bool;
+
+    fn is_full(&self) -> bool;
 }
 
 /// FIFO blocking queue trait

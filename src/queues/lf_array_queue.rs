@@ -114,6 +114,20 @@ impl<T> SizableQueue for LFBQueue<T> {
     fn capacity(&self) -> Option<usize> {
         Some(self.capacity)
     }
+
+    fn is_empty(&self) -> bool {
+        let head = self.head.load(Ordering::Relaxed);
+        let tail = self.tail.load(Ordering::Relaxed);
+
+        tail == head
+    }
+
+    fn is_full(&self) -> bool {
+        let head = self.head.load(Ordering::Relaxed);
+        let tail = self.tail.load(Ordering::Relaxed);
+
+        head.wrapping_add(self.one_lap()) == tail
+    }
 }
 
 ///Non blocking implementation for ArrayBQueue

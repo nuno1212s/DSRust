@@ -95,6 +95,14 @@ impl<T> SizableQueue for MQueue<T> {
     fn capacity(&self) -> Option<usize> {
         Some(self.capacity)
     }
+
+    fn is_empty(&self) -> bool {
+        self.size() == 0
+    }
+
+    fn is_full(&self) -> bool {
+        self.size() == self.capacity()
+    }
 }
 
 impl<T> Queue<T> for MQueue<T> where T: Debug {
