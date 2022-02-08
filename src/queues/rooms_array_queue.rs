@@ -24,6 +24,7 @@ pub struct LFBRArrayQueue<T> {
     rooms: Rooms,
     is_full: AtomicBool,
     capacity: usize,
+    one_lap: usize,
 }
 
 impl<T> LFBRArrayQueue<T> {
@@ -34,6 +35,8 @@ impl<T> LFBRArrayQueue<T> {
             vec.push(Option::None);
         }
 
+        let one_lap = expected_size.next_power_of_two();
+
         Self {
             array: UnsafeWrapper::new(vec),
             head: CachePadded::new(AtomicUsize::new(0)),
@@ -41,11 +44,24 @@ impl<T> LFBRArrayQueue<T> {
             rooms: Rooms::new(3),
             is_full: AtomicBool::new(false),
             capacity: expected_size,
+            one_lap,
         }
     }
 
     pub fn capacity(&self) -> usize {
         self.capacity
+    }
+
+    fn extract_index(&self, lapped_ind: usize) -> usize {
+        lapped_ind & (self.one_lap - 1)
+    }
+
+    fn extract_lap(&self, lapped_ind: usize) -> usize {
+        lapped_ind & !(self.one_lap - 1)
+    }
+
+    fn one_lap(&self) -> usize {
+        self.one_lap
     }
 }
 
@@ -53,14 +69,26 @@ impl<T> SizableQueue for LFBRArrayQueue<T> {
     fn size(&self) -> usize {
         //We use acquire because we want to get the latest values from the other threads, but we won't change anything
         //So the store part can be Relaxed
-        self.rooms.enter_blk_ordered(SIZE_ROOM, Ordering::Relaxed).expect("Failed to enter room?");
+        self.rooms.enter_blk_ordered(SIZE_ROOM, Ordering::Acquire).expect("Failed to enter room?");
 
-        let size = self.tail.load(Ordering::Relaxed) - self.head.load(Ordering::Relaxed);
+        let tail = self.tail.load(Ordering::Relaxed);
+        let head = self.head.load(Ordering::Relaxed);
 
         //Since we perform no changes, we can leave using the relaxed state
         self.rooms.leave_blk_ordered(SIZE_ROOM, Ordering::Relaxed).expect("Failed to exit room");
 
-        size
+        let tail_index = self.extract_index(tail);
+        let head_index = self.extract_index(head);
+
+        if head_index < tail_index {
+            return tail_index - head_index;
+        } else if head_index > tail_index {
+            return (self.capacity() - head_index) + tail_index;
+        } else if tail == head {
+            return 0;
+        } else {
+            return self.capacity();
+        }
     }
 
     fn capacity(&self) -> Option<usize> {
@@ -68,24 +96,26 @@ impl<T> SizableQueue for LFBRArrayQueue<T> {
     }
 
     fn is_empty(&self) -> bool {
-        self.rooms.enter_blk_ordered(SIZE_ROOM, Ordering::Relaxed);
+        self.rooms.enter_blk_ordered(SIZE_ROOM, Ordering::Acquire);
 
-        let size = self.tail.load(Ordering::Relaxed) - self.head.load(Ordering::Relaxed);
+        let tail = self.tail.load(Ordering::Relaxed);
+        let head = self.head.load(Ordering::Relaxed);
 
         //Since we perform no changes, we can leave using the relaxed state
         self.rooms.leave_blk_ordered(SIZE_ROOM, Ordering::Relaxed).expect("Failed to exit room");
 
-        size == 0
+        head == tail
     }
 
     fn is_full(&self) -> bool {
-        self.rooms.enter_blk_ordered(SIZE_ROOM, Ordering::Relaxed);
+        self.rooms.enter_blk_ordered(SIZE_ROOM, Ordering::Acquire);
 
-        let size = self.tail.load(Ordering::Relaxed) - self.head.load(Ordering::Relaxed);
+        let tail = self.tail.load(Ordering::Relaxed);
+        let head = self.head.load(Ordering::Relaxed);
 
         self.rooms.leave_blk_ordered(SIZE_ROOM, Ordering::Relaxed);
 
-        size == self.capacity()
+        head.wrapping_add(self.one_lap()) == tail
     }
 }
 

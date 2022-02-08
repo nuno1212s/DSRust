@@ -10,6 +10,14 @@ impl SizableQueue for ArrayQueue<u32> {
     fn capacity(&self) -> Option<usize> {
         Some(self.capacity())
     }
+
+    fn is_empty(&self) -> bool {
+        self.is_empty()
+    }
+
+    fn is_full(&self) -> bool {
+        self.is_full()
+    }
 }
 
 impl Queue<u32> for ArrayQueue<u32> {
