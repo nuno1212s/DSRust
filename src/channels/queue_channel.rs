@@ -1,19 +1,69 @@
 use std::error::Error;
 use std::fmt::{Debug, Formatter, write};
+use std::future::Future;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::path::Display;
+use std::pin::Pin;
+use std::stream::Stream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{RecvError, SendError, TryRecvError, TrySendError};
+use std::task::{Context, Poll};
 
 use crossbeam_utils::{Backoff, CachePadded};
 use event_listener::{Event, EventListener};
 
 use crate::queues::lf_array_queue::LFBQueue;
 use crate::queues::mqueue::MQueue;
-use crate::queues::queues::{ Queue, QueueError};
+use crate::queues::queues::{Queue, QueueError};
 use crate::queues::rooms_array_queue::LFBRArrayQueue;
+
+pub struct ChannelTx<T, Z> where T: Send + Debug,
+                                 Z: Queue<T> + Send + Sync {
+    inner: Sender<T, Z>,
+}
+
+pub struct ChannelRx<T, Z> where T: Send + Debug,
+                                 Z: Queue<T> + Send + Sync {
+    inner: Receiver<T, Z>,
+}
+
+pub struct ChannelRxFut<'a, T, Z> where T: Send + Debug,
+                                        Z: Queue<T> + Send + Sync {
+    inner: &'a mut Receiver<T, Z>,
+}
+
+
+impl<T, Z> ChannelTx<T, Z> where T: Send + Debug,
+                                 Z: Queue<T> + Send + Sync {
+    #[inline]
+    pub async fn send(&mut self, message: T) -> Result<(), SendError<T>> {
+        self.inner.send_async(message).await
+    }
+}
+
+impl<T, Z> ChannelRx<T, Z> where T: Send + Debug,
+                                 Z: Queue<T> + Send + Sync {
+    #[inline]
+    pub fn recv<'a>(&'a mut self) -> ChannelRxFut<'a, T, Z> {
+        let inner = &mut self.inner;
+
+        ChannelRxFut { inner }
+    }
+}
+
+impl<'a, T, Z> Future for ChannelRxFut<'a, T, Z> where T: Send + Debug,
+                                                       Z: Queue<T> + Send + Sync {
+    type Output = Result<T, RecvError>;
+
+    #[inline]
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.inner)
+            .poll_next(cx)
+            .map(|opt| opt.ok_or(RecvError))
+    }
+}
 
 pub struct Sender<T, Z> where T: Send + Debug,
                           Z: Queue<T> + Send + Sync {
@@ -25,12 +75,12 @@ pub struct Receiver<T, Z> where T: Send + Debug,
                             Z: Queue<T> + Send + Sync {
     inner: Arc<ReceivingInner<T, Z>>,
     phantom: PhantomData<T>,
+    listener: Option<EventListener>,
 }
 
 impl<T, Z> Sender<T, Z> where T: Send + Debug,
                               Z: Queue<T> + Send + Sync {
     fn new(inner: Arc<SendingInner<T, Z>>) -> Self {
-
         Self {
             inner,
             phantom: PhantomData::default(),
@@ -118,15 +168,69 @@ impl<T, Z> Sender<T, Z> where T: Send + Debug,
             }
         }
     }
+
+    async fn send_async(&self, elem: T) -> Result<(), SendError<T>> {
+        let backoff = Backoff::new();
+
+        let mut obj = elem;
+
+        loop {
+            match self.try_send(obj) {
+                Ok(_) => {
+                    return Ok(());
+                }
+                Err(err) => {
+                    match err {
+                        TrySendError::Full(elem) => {
+                            obj = elem;
+                        }
+                        TrySendError::Disconnected(elem) => {
+                            obj = elem;
+                        }
+                    }
+                }
+            }
+
+            if backoff.is_completed() {
+                self.inner.awaiting_reception.fetch_add(1, Ordering::Release);
+
+                loop {
+                    match self.try_send(obj) {
+                        Ok(_) => {
+                            break;
+                        }
+                        Err(err) => {
+                            match err {
+                                TrySendError::Full(elem) => {
+                                    obj = elem;
+                                }
+                                TrySendError::Disconnected(elem) => {
+                                    return Err(SendError(elem));
+                                }
+                            }
+                        }
+                    }
+
+                    self.inner.waiting_reception.listen().await;
+                }
+
+                self.inner.awaiting_reception.fetch_sub(1, Ordering::Release);
+
+                return Ok(());
+            } else {
+                backoff.snooze();
+            }
+        }
+    }
 }
 
 impl<T, Z> Receiver<T, Z> where T: Send + Debug,
                                 Z: Queue<T> + Send + Sync {
     fn new(inner: Arc<ReceivingInner<T, Z>>) -> Self {
-
         Self {
             inner,
             phantom: PhantomData::default(),
+            listener: Option::None,
         }
     }
 
@@ -271,6 +375,48 @@ impl<T, Z> Receiver<T, Z> where T: Send + Debug,
     }
 }
 
+impl<T, Z> Unpin for Receiver<T, Z> where T: Send + Debug,
+                                          Z: Queue<T> + Send + Sync {}
+
+///Implement the stream for the receiver
+impl<T, Z> Stream for Receiver<T, Z> where T: Send + Debug,
+                                           Z: Queue<T> + Send + Sync {
+    type Item = T;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            if let Some(ev_listener) = self.listener.as_mut() {
+                futures_core::ready!(Pin::new(ev_listener).poll(cx));
+
+                self.listener = Option::None;
+            }
+
+            loop {
+                match self.try_recv() {
+                    Ok(msg) => {
+                        self.listener = None;
+
+                        return Poll::Ready(Some(msg));
+                    }
+                    Err(TryRecvError::Disconnected) => {
+                        self.listener = None;
+
+                        return Poll::Ready(None);
+                    }
+                    Err(TryRecvError::Empty) => {
+                        match self.listener.as_mut() {
+                            None => {
+                                self.listener = Some(self.inner.waiting_sending.listen());
+                            }
+                            Some(_) => { break; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl<T, Z> Clone for Sender<T, Z> where T: Send + Debug,
                                         Z: Queue<T> + Send + Sync {
     fn clone(&self) -> Self {
@@ -285,6 +431,11 @@ impl<T, Z> Clone for Receiver<T, Z> where T: Send + Debug,
     }
 }
 
+///We have this extra abstractions so we can keep
+///Count of how many sending clone there are without
+///having to count them, as when this sending inner
+///gets disposed of, it means that no other processes
+///Are listening, so the channel is effectively closed
 struct SendingInner<T, Z> where T: Send + Debug,
                                 Z: Queue<T> + Send + Sync {
     inner: Arc<Inner<T, Z>>,
@@ -330,6 +481,10 @@ impl<T, Z> Drop for ReceivingInner<T, Z> where T: Send + Debug,
                                                Z: Queue<T> + Send + Sync {
     fn drop(&mut self) {
         self.inner.is_dc.store(true, Ordering::Relaxed);
+
+        //Notify all waiting processes that the queue is now closed
+        self.inner.waiting_sending.notify(usize::MAX);
+        self.inner.waiting_reception.notify(usize::MAX);
     }
 }
 
@@ -346,6 +501,10 @@ impl<T, Z> Drop for SendingInner<T, Z> where T: Send + Debug,
                                              Z: Queue<T> + Send + Sync {
     fn drop(&mut self) {
         self.inner.is_dc.store(true, Ordering::Relaxed);
+
+        //Notify all waiting processes that the queue is now closed
+        self.inner.waiting_sending.notify(usize::MAX);
+        self.inner.waiting_reception.notify(usize::MAX);
     }
 }
 
@@ -373,7 +532,7 @@ impl<T, Z> Inner<T, Z> where T: Send + Debug,
             awaiting_sending: CachePadded::new(AtomicU32::new(0)),
             waiting_reception: Event::new(),
             waiting_sending: Event::new(),
-            phantom: PhantomData::default()
+            phantom: PhantomData::default(),
         }
     }
 }
@@ -454,3 +613,4 @@ pub fn bounded_mutex_no_backoff_queue<T>(capacity: usize) -> (Sender<T, MQueue<T
 
     (Sender::new(Arc::new(sending_arc)), Receiver::new(Arc::new(receiving_arc)))
 }
+
