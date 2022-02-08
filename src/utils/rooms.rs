@@ -2,7 +2,7 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::atomic::Ordering::Relaxed;
-use crossbeam_utils::Backoff;
+use crossbeam_utils::{Backoff, CachePadded};
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 enum State {
@@ -121,14 +121,14 @@ impl State {
 /// Whenever any thread joins a room X, no other thread can enter any other room Y, however any number of
 /// threads can enter the room X.
 pub struct Rooms {
-    state: AtomicU64,
+    state: CachePadded<AtomicU64>,
     room_count: u32,
 }
 
 impl Rooms {
     pub fn new(room_count: u32) -> Self {
         Self {
-            state: AtomicU64::new(0),
+            state: CachePadded::new(AtomicU64::new(0)),
             room_count,
         }
     }

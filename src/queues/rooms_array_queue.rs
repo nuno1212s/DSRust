@@ -15,8 +15,12 @@ const REM_ROOM: i32 = 3;
 
 ///A bounded queue with rooms and exponential backoff to prevent over contention when
 ///Working with many concurrent threads
-///TODO: Fix the issue that is caused by the head and tail being strictly ascending
-///Therefore we will reach a point of overflow with continued use.
+///
+/// The capacity can only be a power of two, because of the overflow in the head and tail indexes,
+/// which are strictly ascending. By making capacity always a power of two, when the overflow happens
+/// the index % capacity will stay the same and therefore the queue will continue to function
+/// as expected without adding a performance penalty with another load operation and spin lock
+/// to utilize the laps alternative.
 pub struct LFBRArrayQueue<T> {
     array: UnsafeWrapper<Vec<Option<T>>>,
     head: CachePadded<AtomicUsize>,
@@ -34,13 +38,22 @@ impl<T> LFBRArrayQueue<T> {
             vec.push(Option::None);
         }
 
+        //Always use the next power of two, so when we have overflow on the
+        //Head and tail, since we always % capacity, the indexes won't be
+        //Screwed up!
+        let capacity = if !expected_size.is_power_of_two() {
+            expected_size.next_power_of_two()
+        } else {
+            expected_size
+        };
+
         Self {
             array: UnsafeWrapper::new(vec),
             head: CachePadded::new(AtomicUsize::new(0)),
             tail: CachePadded::new(AtomicUsize::new(0)),
             rooms: Rooms::new(3),
             is_full: AtomicBool::new(false),
-            capacity: expected_size,
+            capacity,
         }
     }
 
