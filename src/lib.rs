@@ -19,6 +19,10 @@ pub mod utils {
     pub mod rooms;
 }
 
+pub mod maps {
+    pub mod hash_map;
+}
+
 pub mod queues {
     pub mod rooms_array_queue;
     pub mod queues;

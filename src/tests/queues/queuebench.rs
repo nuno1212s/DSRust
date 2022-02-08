@@ -264,6 +264,45 @@ pub mod queue_bench {
         }
     }
 
+    fn test_mpmc(queue: Box<dyn BQueue<u32> + Send + Sync>, capacity: usize, operations: usize, producer_threads: usize,
+                 consumer_threads: usize, bencher: Arc<Benchmark>) {
+        let operations_per_producer = operations / producer_threads;
+
+        let operations_per_consumer = operations / consumer_threads;
+
+        let queue_arc = Arc::new(queue);
+
+        let mut threads = Vec::with_capacity(producer_threads);
+
+        for thread in 0..producer_threads {
+            let queue_prod = queue_arc.clone();
+
+            let bench_ref = bencher.clone();
+
+            let handles = std::thread::spawn(move || {
+                start_blocking_producer(queue_prod, operations_per_producer, bench_ref, thread)
+            });
+
+            threads.push(handles);
+        }
+
+        for thread in 0..consumer_threads {
+            let queue_prod = queue_arc.clone();
+
+            let bench_ref = bencher.clone();
+
+            let handles = std::thread::spawn(move || {
+                start_blocking_consumer(queue_prod, operations, bench_ref, 0);
+            });
+
+            threads.push(handles);
+        }
+
+        for x in threads {
+            x.join().unwrap();
+        }
+    }
+
     #[test]
     pub fn bench_mpsc_blocking() {
         let capacity = 10000;
@@ -319,6 +358,36 @@ pub mod queue_bench {
             }
 
             producer_threads *= 2;
+        }
+    }
+
+    #[test]
+    pub fn bench_mpmc() {
+        let capacity = 10000;
+
+        let operations = 10_000_000;
+
+        let mut threads = 2;
+
+        let bencher = Arc::new(Benchmark::new());
+
+        while threads <= 16 {
+            println!("Testing for {} threads: ", threads);
+
+            for a in BenchedQueues::iterator() {
+                println!("Testing {}", a.name());
+
+                let queue = a.gen_blk_queue(capacity);
+
+                test_mpmc(queue, capacity, operations, threads,
+                          threads, bencher.clone());
+
+                let vec = bencher.take_results();
+
+                Benchmark::show_results(vec);
+            }
+
+            threads *= 2;
         }
     }
 }
