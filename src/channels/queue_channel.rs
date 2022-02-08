@@ -16,13 +16,13 @@ use crate::queues::mqueue::MQueue;
 use crate::queues::queues::{BQueue, Queue, QueueError, SizableQueue};
 use crate::queues::rooms_array_queue::LFBRArrayQueue;
 
-struct Sender<T, Z> where T: Send,
+pub struct Sender<T, Z> where T: Send,
                           Z: BQueue<T> + Queue<T> + Send + Sync {
     inner: Arc<SendingInner<T, Z>>,
     listener: EventListener,
 }
 
-struct Receiver<T, Z> where T: Send,
+pub struct Receiver<T, Z> where T: Send,
                             Z: BQueue<T> + Queue<T> + Send + Sync {
     inner: Arc<ReceivingInner<T, Z>>,
     listener: EventListener,
