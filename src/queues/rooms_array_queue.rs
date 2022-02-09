@@ -199,7 +199,7 @@ impl<T> Queue<T> for LFBRArrayQueue<T> where T: Debug {
             return Err(MalformedInputVec);
         }
 
-        //Acquire the
+        //Acquire the room
         self.rooms.enter_blk_ordered(REM_ROOM, Ordering::Acquire);
 
         //Since we are in a remove room we know the tail is not going to be altered

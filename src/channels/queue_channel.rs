@@ -13,6 +13,7 @@ use std::task::{Context, Poll};
 
 use crossbeam_utils::{Backoff, CachePadded};
 use event_listener::{Event, EventListener};
+use fastrand::usize;
 
 use crate::queues::lf_array_queue::LFBQueue;
 use crate::queues::mqueue::MQueue;
@@ -34,7 +35,6 @@ pub struct ChannelRxFut<'a, T, Z> where T: Send + Debug,
     inner: &'a mut Receiver<T, Z>,
 }
 
-
 impl<T, Z> ChannelTx<T, Z> where T: Send + Debug,
                                  Z: Queue<T> + Send + Sync {
     #[inline]
@@ -45,11 +45,50 @@ impl<T, Z> ChannelTx<T, Z> where T: Send + Debug,
 
 impl<T, Z> ChannelRx<T, Z> where T: Send + Debug,
                                  Z: Queue<T> + Send + Sync {
+    ///Async receiver with no backoff (Turns straight to event notifications)
     #[inline]
     pub fn recv<'a>(&'a mut self) -> ChannelRxFut<'a, T, Z> {
         let inner = &mut self.inner;
 
         ChannelRxFut { inner }
+    }
+
+    ///Blocking receiver with backoff and event notification on backoff complete
+    #[inline]
+    pub fn recv_backoff(&self) -> Result<T, RecvError> {
+        self.inner.inner.recv()
+    }
+
+    ///Async receiver with backoff and async event notification on backoff complete
+    #[inline]
+    pub async fn recv_async_backoff(&self) -> Result<T, RecvError> {
+        self.inner.inner.recv_async().await
+    }
+
+    ///A blocking receiver with backoff and event notification on backoff complete
+    #[inline]
+    pub fn recv_mult(&self, target: &mut Vec<T>) -> Result<usize, RecvError> {
+        return match self.inner.inner.recv_mult(target) {
+            Ok(std) => {
+                Ok(std)
+            }
+            Err(_) => {
+                Err(RecvError)
+            }
+        };
+    }
+
+    ///Async receiver with backoff and async event notification on backoff complete
+    #[inline]
+    pub async fn recv_mult_async(&self, target: &mut Vec<T>) -> Result<usize, RecvError> {
+        return match self.inner.inner.recv_mult_async(target).await {
+            Ok(std) => {
+                Ok(std)
+            }
+            Err(_) => {
+                Err(RecvError)
+            }
+        };
     }
 }
 
@@ -66,13 +105,13 @@ impl<'a, T, Z> Future for ChannelRxFut<'a, T, Z> where T: Send + Debug,
 }
 
 pub struct Sender<T, Z> where T: Send + Debug,
-                          Z: Queue<T> + Send + Sync {
+                              Z: Queue<T> + Send + Sync {
     inner: Arc<SendingInner<T, Z>>,
     phantom: PhantomData<T>,
 }
 
 pub struct Receiver<T, Z> where T: Send + Debug,
-                            Z: Queue<T> + Send + Sync {
+                                Z: Queue<T> + Send + Sync {
     inner: Arc<ReceivingInner<T, Z>>,
     phantom: PhantomData<T>,
     listener: Option<EventListener>,
@@ -224,6 +263,13 @@ impl<T, Z> Sender<T, Z> where T: Send + Debug,
     }
 }
 
+impl<T, Z> Clone for Sender<T, Z> where T: Send + Debug,
+                                        Z: Queue<T> + Send + Sync {
+    fn clone(&self) -> Self {
+        return Self::new(self.inner.clone());
+    }
+}
+
 impl<T, Z> Receiver<T, Z> where T: Send + Debug,
                                 Z: Queue<T> + Send + Sync {
     fn new(inner: Arc<ReceivingInner<T, Z>>) -> Self {
@@ -233,6 +279,92 @@ impl<T, Z> Receiver<T, Z> where T: Send + Debug,
             listener: Option::None,
         }
     }
+}
+
+impl<T, Z> Unpin for Receiver<T, Z> where T: Send + Debug,
+                                          Z: Queue<T> + Send + Sync {}
+
+///Implement the stream for the receiver
+impl<T, Z> Stream for Receiver<T, Z> where T: Send + Debug,
+                                           Z: Queue<T> + Send + Sync {
+    type Item = T;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            if let Some(ev_listener) = self.listener.as_mut() {
+                futures_core::ready!(Pin::new(ev_listener).poll(cx));
+
+                self.listener = Option::None;
+            }
+
+            loop {
+                match self.inner.try_recv() {
+                    Ok(msg) => {
+                        self.listener = None;
+
+                        return Poll::Ready(Some(msg));
+                    }
+                    Err(TryRecvError::Disconnected) => {
+                        self.listener = None;
+
+                        return Poll::Ready(None);
+                    }
+                    Err(TryRecvError::Empty) => {
+                        match self.listener.as_mut() {
+                            None => {
+                                self.listener = Some(self.inner.waiting_sending.listen());
+                            }
+                            Some(_) => { break; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<T, Z> Clone for Receiver<T, Z> where T: Send + Debug,
+                                          Z: Queue<T> + Send + Sync {
+    fn clone(&self) -> Self {
+        return Self::new(self.inner.clone());
+    }
+}
+
+///We have this extra abstractions so we can keep
+///Count of how many sending clone there are without
+///having to count them, as when this sending inner
+///gets disposed of, it means that no other processes
+///Are listening, so the channel is effectively closed
+struct SendingInner<T, Z> where T: Send + Debug,
+                                Z: Queue<T> + Send + Sync {
+    inner: Arc<Inner<T, Z>>,
+    phantom: PhantomData<T>,
+}
+
+struct ReceivingInner<T, Z> where T: Send + Debug,
+                                  Z: Queue<T> + Send + Sync {
+    inner: Arc<Inner<T, Z>>,
+    phantom: PhantomData<T>,
+}
+
+impl<T, Z> SendingInner<T, Z> where T: Send + Debug,
+                                    Z: Queue<T> + Send + Sync {
+    fn new(inner: Arc<Inner<T, Z>>) -> Self {
+        Self {
+            inner,
+            phantom: PhantomData::default(),
+        }
+    }
+}
+
+impl<T, Z> ReceivingInner<T, Z> where T: Send + Debug,
+                                      Z: Queue<T> + Send + Sync {
+    fn new(inner: Arc<Inner<T, Z>>) -> Self {
+        Self {
+            inner,
+            phantom: PhantomData::default(),
+        }
+    }
 
     fn notify_if_necessary(&self) {
         if self.inner.awaiting_reception.load(Ordering::Acquire) > 0 {
@@ -240,7 +372,7 @@ impl<T, Z> Receiver<T, Z> where T: Send + Debug,
         }
     }
 
-    fn try_recv(&self) -> Result<T, TryRecvError> {
+    pub fn try_recv(&self) -> Result<T, TryRecvError> {
         if self.inner.is_dc.load(Ordering::Relaxed) && self.inner.queue.is_empty() {
             //Test if the queue is empty so if the senders are disconnected,
             //We can still receive all the elements that are lacking in the list
@@ -259,7 +391,7 @@ impl<T, Z> Receiver<T, Z> where T: Send + Debug,
         };
     }
 
-    fn recv(&self) -> Result<T, RecvError> {
+    pub fn recv(&self) -> Result<T, RecvError> {
         let backoff = Backoff::new();
 
         loop {
@@ -311,7 +443,7 @@ impl<T, Z> Receiver<T, Z> where T: Send + Debug,
         }
     }
 
-    async fn recv_async(&self) -> Result<T, RecvError> {
+    pub async fn recv_async(&self) -> Result<T, RecvError> {
         let backoff = Backoff::new();
 
         loop {
@@ -363,107 +495,97 @@ impl<T, Z> Receiver<T, Z> where T: Send + Debug,
         }
     }
 
-    fn recv_mult(&self, vec: &mut Vec<T>) -> Result<usize, RecvMultError> {
+    pub fn recv_mult(&self, vec: &mut Vec<T>) -> Result<usize, RecvMultError> {
         if self.inner.is_dc.load(Ordering::Relaxed) {
             return Err(RecvMultError::Disconnected);
         }
 
-        return match self.inner.queue.dump(vec) {
-            Ok(amount) => { Ok(amount) }
-            Err(_) => { Err(RecvMultError::MalformedInputVec) }
-        };
-    }
-}
+        let backoff = Backoff::new();
 
-impl<T, Z> Unpin for Receiver<T, Z> where T: Send + Debug,
-                                          Z: Queue<T> + Send + Sync {}
-
-///Implement the stream for the receiver
-impl<T, Z> Stream for Receiver<T, Z> where T: Send + Debug,
-                                           Z: Queue<T> + Send + Sync {
-    type Item = T;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
-            if let Some(ev_listener) = self.listener.as_mut() {
-                futures_core::ready!(Pin::new(ev_listener).poll(cx));
-
-                self.listener = Option::None;
-            }
-
-            loop {
-                match self.try_recv() {
-                    Ok(msg) => {
-                        self.listener = None;
-
-                        return Poll::Ready(Some(msg));
-                    }
-                    Err(TryRecvError::Disconnected) => {
-                        self.listener = None;
-
-                        return Poll::Ready(None);
-                    }
-                    Err(TryRecvError::Empty) => {
-                        match self.listener.as_mut() {
-                            None => {
-                                self.listener = Some(self.inner.waiting_sending.listen());
-                            }
-                            Some(_) => { break; }
-                        }
+            match self.inner.queue.dump(vec) {
+                Ok(amount) => {
+                    if amount > 0 {
+                        return Ok(amount);
                     }
                 }
+                Err(_) => {
+                    return Err(RecvMultError::MalformedInputVec);
+                }
+            };
+
+            if backoff.is_completed() {
+                self.inner.awaiting_sending.fetch_add(1, Ordering::Release);
+                let ret;
+
+                loop {
+                    match self.inner.queue.dump(vec) {
+                        Ok(elem) => {
+                            if elem > 0 {
+                                ret = Ok(elem);
+                                break;
+                            }
+                        }
+                        Err(_) => {
+                            ret = Err(RecvMultError::MalformedInputVec);
+                            break;
+                        }
+                    }
+
+                    self.inner.waiting_sending.listen().wait();
+                }
+
+                self.inner.awaiting_sending.fetch_sub(1, Ordering::Release);
+            } else {
+                backoff.snooze();
             }
         }
     }
-}
 
-impl<T, Z> Clone for Sender<T, Z> where T: Send + Debug,
-                                        Z: Queue<T> + Send + Sync {
-    fn clone(&self) -> Self {
-        return Self::new(self.inner.clone());
-    }
-}
-
-impl<T, Z> Clone for Receiver<T, Z> where T: Send + Debug,
-                                          Z: Queue<T> + Send + Sync {
-    fn clone(&self) -> Self {
-        return Self::new(self.inner.clone());
-    }
-}
-
-///We have this extra abstractions so we can keep
-///Count of how many sending clone there are without
-///having to count them, as when this sending inner
-///gets disposed of, it means that no other processes
-///Are listening, so the channel is effectively closed
-struct SendingInner<T, Z> where T: Send + Debug,
-                                Z: Queue<T> + Send + Sync {
-    inner: Arc<Inner<T, Z>>,
-    phantom: PhantomData<T>,
-}
-
-struct ReceivingInner<T, Z> where T: Send + Debug,
-                                  Z: Queue<T> + Send + Sync {
-    inner: Arc<Inner<T, Z>>,
-    phantom: PhantomData<T>,
-}
-
-impl<T, Z> SendingInner<T, Z> where T: Send + Debug,
-                                    Z: Queue<T> + Send + Sync {
-    fn new(inner: Arc<Inner<T, Z>>) -> Self {
-        Self {
-            inner,
-            phantom: PhantomData::default(),
+    pub async fn recv_mult_async(&self, vec: &mut Vec<T>) -> Result<usize, RecvMultError> {
+        if self.inner.is_dc.load(Ordering::Relaxed) {
+            return Err(RecvMultError::Disconnected);
         }
-    }
-}
 
-impl<T, Z> ReceivingInner<T, Z> where T: Send + Debug,
-                                      Z: Queue<T> + Send + Sync {
-    fn new(inner: Arc<Inner<T, Z>>) -> Self {
-        Self {
-            inner,
-            phantom: PhantomData::default(),
+        let backoff = Backoff::new();
+
+        loop {
+            match self.inner.queue.dump(vec) {
+                Ok(amount) => {
+                    if amount > 0 {
+                        return Ok(amount);
+                    }
+                }
+                Err(_) => {
+                    return Err(RecvMultError::MalformedInputVec);
+                }
+            };
+
+            if backoff.is_completed() {
+                self.inner.awaiting_sending.fetch_add(1, Ordering::Release);
+                let ret;
+
+                loop {
+                    match self.inner.queue.dump(vec) {
+                        Ok(elem) => {
+                            if elem > 0 {
+                                ret = Ok(elem);
+                                break;
+                            }
+                        }
+                        Err(_) => {
+                            ret = Err(RecvMultError::MalformedInputVec);
+                            break;
+                        }
+                    }
+
+                    self.inner.waiting_sending.listen().await;
+                }
+
+                self.inner.awaiting_sending.fetch_sub(1, Ordering::Release);
+            } else {
+                backoff.snooze();
+            }
         }
     }
 }
@@ -570,7 +692,7 @@ impl std::fmt::Display for RecvMultError {
 
 impl Error for RecvMultError {}
 
-pub fn bounded_lf_queue<T>(capacity: usize) -> (Sender<T, LFBQueue<T>>, Receiver<T, LFBQueue<T>>)
+pub fn bounded_lf_queue<T>(capacity: usize) -> (ChannelTx<T, LFBQueue<T>>, ChannelRx<T, LFBQueue<T>>)
     where T: Send + Debug {
     let inner = Inner::new(LFBQueue::new(capacity));
 
@@ -578,10 +700,11 @@ pub fn bounded_lf_queue<T>(capacity: usize) -> (Sender<T, LFBQueue<T>>, Receiver
     let sending_arc = SendingInner::new(inner_arc.clone());
     let receiving_arc = ReceivingInner::new(inner_arc);
 
-    (Sender::new(Arc::new(sending_arc)), Receiver::new(Arc::new(receiving_arc)))
+    (ChannelTx { inner: Sender::new(Arc::new(sending_arc)) },
+     ChannelRx { inner: Receiver::new(Arc::new(receiving_arc)) })
 }
 
-pub fn bounded_lf_room_queue<T>(capacity: usize) -> (Sender<T, LFBRArrayQueue<T>>, Receiver<T, LFBRArrayQueue<T>>)
+/*pub fn bounded_lf_room_queue<T>(capacity: usize) -> (ChannelTx<T, LFBRArrayQueue<T>>, ChannelRx<T, LFBRArrayQueue<T>>)
     where T: Send + Debug {
     let inner = Inner::new(LFBRArrayQueue::new(capacity));
 
@@ -592,7 +715,7 @@ pub fn bounded_lf_room_queue<T>(capacity: usize) -> (Sender<T, LFBRArrayQueue<T>
     (Sender::new(Arc::new(sending_arc)), Receiver::new(Arc::new(receiving_arc)))
 }
 
-pub fn bounded_mutex_backoff_queue<T>(capacity: usize) -> (Sender<T, MQueue<T>>, Receiver<T, MQueue<T>>)
+pub fn bounded_mutex_backoff_queue<T>(capacity: usize) -> (ChannelTx<T, MQueue<T>>, ChannelRx<T, MQueue<T>>)
     where T: Send + Debug {
     let inner = Inner::new(MQueue::new(capacity, true));
 
@@ -603,7 +726,7 @@ pub fn bounded_mutex_backoff_queue<T>(capacity: usize) -> (Sender<T, MQueue<T>>,
     (Sender::new(Arc::new(sending_arc)), Receiver::new(Arc::new(receiving_arc)))
 }
 
-pub fn bounded_mutex_no_backoff_queue<T>(capacity: usize) -> (Sender<T, MQueue<T>>, Receiver<T, MQueue<T>>)
+pub fn bounded_mutex_no_backoff_queue<T>(capacity: usize) -> (ChannelTx<T, MQueue<T>>, ChannelRx<T, MQueue<T>>)
     where T: Send + Debug {
     let inner = Inner::new(MQueue::new(capacity, false));
 
@@ -613,4 +736,4 @@ pub fn bounded_mutex_no_backoff_queue<T>(capacity: usize) -> (Sender<T, MQueue<T
 
     (Sender::new(Arc::new(sending_arc)), Receiver::new(Arc::new(receiving_arc)))
 }
-
+*/
