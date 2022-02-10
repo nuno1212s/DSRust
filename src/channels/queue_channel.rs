@@ -67,8 +67,38 @@ impl<T, Z> ChannelRx<T, Z> where T: Send + Debug,
 
     ///A blocking receiver with backoff and event notification on backoff complete
     #[inline]
-    pub fn recv_mult(&self, target: &mut Vec<T>) -> Result<usize, RecvError> {
+    pub fn recv_mult_with_target(&self, target: &mut Vec<T>) -> Result<usize, RecvError> {
         return match self.inner.inner.recv_mult(target) {
+            Ok(std) => {
+                Ok(std)
+            }
+            Err(_) => {
+                Err(RecvError)
+            }
+        };
+    }
+
+    ///A blocking receiver with backoff and event notification on backoff complete
+    #[inline]
+    pub fn recv_mult(&self) -> Result<Vec<T>, RecvError> {
+
+        let mut target = Vec::with_capacity(self.inner.inner.queue.capacity().unwrap_or(1024));
+
+        return match self.inner.inner.recv_mult(&mut target) {
+            Ok(_) => {
+                Ok(target)
+            }
+            Err(_) => {
+                Err(RecvError)
+            }
+        };
+    }
+
+
+    ///Async receiver with backoff and async event notification on backoff complete
+    #[inline]
+    pub async fn recv_mult_with_target_async(&self, target: &mut Vec<T>) -> Result<usize, RecvError> {
+        return match self.inner.inner.recv_mult_async(target).await {
             Ok(std) => {
                 Ok(std)
             }
@@ -80,16 +110,19 @@ impl<T, Z> ChannelRx<T, Z> where T: Send + Debug,
 
     ///Async receiver with backoff and async event notification on backoff complete
     #[inline]
-    pub async fn recv_mult_async(&self, target: &mut Vec<T>) -> Result<usize, RecvError> {
-        return match self.inner.inner.recv_mult_async(target).await {
-            Ok(std) => {
-                Ok(std)
+    pub async fn recv_mult_async(&self) -> Result<Vec<T>, RecvError> {
+        let mut target = Vec::with_capacity(self.inner.inner.queue.capacity().unwrap_or(1024));
+
+        return match self.inner.inner.recv_mult_async(&mut target).await {
+            Ok(_) => {
+                Ok(target)
             }
             Err(_) => {
                 Err(RecvError)
             }
         };
     }
+
 }
 
 impl<'a, T, Z> Future for ChannelRxFut<'a, T, Z> where T: Send + Debug,
@@ -704,7 +737,7 @@ pub fn bounded_lf_queue<T>(capacity: usize) -> (ChannelTx<T, LFBQueue<T>>, Chann
      ChannelRx { inner: Receiver::new(Arc::new(receiving_arc)) })
 }
 
-/*pub fn bounded_lf_room_queue<T>(capacity: usize) -> (ChannelTx<T, LFBRArrayQueue<T>>, ChannelRx<T, LFBRArrayQueue<T>>)
+pub fn bounded_lf_room_queue<T>(capacity: usize) -> (ChannelTx<T, LFBRArrayQueue<T>>, ChannelRx<T, LFBRArrayQueue<T>>)
     where T: Send + Debug {
     let inner = Inner::new(LFBRArrayQueue::new(capacity));
 
@@ -712,7 +745,8 @@ pub fn bounded_lf_queue<T>(capacity: usize) -> (ChannelTx<T, LFBQueue<T>>, Chann
     let sending_arc = SendingInner::new(inner_arc.clone());
     let receiving_arc = ReceivingInner::new(inner_arc);
 
-    (Sender::new(Arc::new(sending_arc)), Receiver::new(Arc::new(receiving_arc)))
+    (ChannelTx { inner: Sender::new(Arc::new(sending_arc)) },
+     ChannelRx { inner: Receiver::new(Arc::new(receiving_arc)) })
 }
 
 pub fn bounded_mutex_backoff_queue<T>(capacity: usize) -> (ChannelTx<T, MQueue<T>>, ChannelRx<T, MQueue<T>>)
@@ -723,7 +757,8 @@ pub fn bounded_mutex_backoff_queue<T>(capacity: usize) -> (ChannelTx<T, MQueue<T
     let sending_arc = SendingInner::new(inner_arc.clone());
     let receiving_arc = ReceivingInner::new(inner_arc);
 
-    (Sender::new(Arc::new(sending_arc)), Receiver::new(Arc::new(receiving_arc)))
+    (ChannelTx { inner: Sender::new(Arc::new(sending_arc)) },
+     ChannelRx { inner: Receiver::new(Arc::new(receiving_arc)) })
 }
 
 pub fn bounded_mutex_no_backoff_queue<T>(capacity: usize) -> (ChannelTx<T, MQueue<T>>, ChannelRx<T, MQueue<T>>)
@@ -734,6 +769,6 @@ pub fn bounded_mutex_no_backoff_queue<T>(capacity: usize) -> (ChannelTx<T, MQueu
     let sending_arc = SendingInner::new(inner_arc.clone());
     let receiving_arc = ReceivingInner::new(inner_arc);
 
-    (Sender::new(Arc::new(sending_arc)), Receiver::new(Arc::new(receiving_arc)))
+    (ChannelTx { inner: Sender::new(Arc::new(sending_arc)) },
+     ChannelRx { inner: Receiver::new(Arc::new(receiving_arc)) })
 }
-*/
