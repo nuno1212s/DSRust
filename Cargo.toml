@@ -1,5 +1,5 @@
 [package]
-name = "DSRust"
+name = "dsrust"
 version = "0.1.0"
 edition = "2021"
 
