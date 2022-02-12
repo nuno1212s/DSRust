@@ -1,4 +1,3 @@
-#![feature(fn_traits)]
 #![feature(async_stream)]
 
 pub mod tests {

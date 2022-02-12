@@ -1,11 +1,13 @@
+use std::cell::Cell;
 use std::fmt::Debug;
 
 use crossbeam_utils::Backoff;
 use parking_lot::{Condvar, Mutex};
 use crate::queues::queues::{BQueue, Queue, QueueError, SizableQueue};
+use crate::utils::memory_access::UnsafeWrapper;
 
 struct QueueData<T> {
-    array: Vec<Option<T>>,
+    array: Cell<Vec<Option<T>>>,
     head: usize,
     size: usize,
 }
@@ -13,7 +15,7 @@ struct QueueData<T> {
 impl<T> QueueData<T> {
     fn new(vec: Vec<Option<T>>) -> Self {
         Self {
-            array: vec,
+            array: Cell::new(vec),
             head: 0,
             size: 0,
         }
@@ -28,9 +30,11 @@ impl<T> QueueData<T> {
     }
 
     fn array(&mut self) -> &mut Vec<Option<T>> {
-        &mut self.array
+        self.array.get_mut()
     }
 }
+
+unsafe impl<T> Send for QueueData<T> {}
 
 pub struct MQueue<T> {
     capacity: usize,
@@ -121,7 +125,7 @@ impl<T> Queue<T> for MQueue<T> where T: Debug {
                         let size = lock_guard.size();
 
                         if size >= self.capacity() {
-                            return Err(QueueError::QueueFull{0: elem});
+                            return Err(QueueError::QueueFull { 0: elem });
                         }
 
                         let head = lock_guard.head();
@@ -152,7 +156,7 @@ impl<T> Queue<T> for MQueue<T> where T: Debug {
             let size = lock_guard.size();
 
             if size >= self.capacity() {
-                return Err(QueueError::QueueFull{0: elem});
+                return Err(QueueError::QueueFull { 0: elem });
             }
 
             let head = lock_guard.head();
@@ -248,7 +252,7 @@ impl<T> Queue<T> for MQueue<T> where T: Debug {
 
                         let mut head = lock_guard.head();
 
-                        let to_remove= lock_guard.size;
+                        let to_remove = lock_guard.size;
 
                         let mut cur_size = size;
 
@@ -302,7 +306,7 @@ impl<T> Queue<T> for MQueue<T> where T: Debug {
     }
 }
 
-impl<T> BQueue<T> for MQueue<T> where T:Debug{
+impl<T> BQueue<T> for MQueue<T> where T: Debug {
     fn enqueue_blk(&self, elem: T) {
         if self.backoff() {
             let backoff = Backoff::new();
@@ -391,7 +395,7 @@ impl<T> BQueue<T> for MQueue<T> where T:Debug{
                         return elem.unwrap();
                     }
 
-                   None => {}
+                    None => {}
                 }
 
                 backoff.spin();

@@ -142,7 +142,7 @@ impl Rooms {
         self.room_count
     }
 
-    fn change_state_blk<F>(&self, apply: F, room: i32, success_ordering: Ordering) where F: FnOnce(&State, i32) -> State + Copy {
+    fn change_state_blk<F>(&self, apply: F, room: i32, success_ordering: Ordering) where F: Fn(&State, i32) -> State + Copy {
         let backoff = Backoff::new();
 
         let mut x = self.state.load(Ordering::Relaxed);
@@ -163,7 +163,7 @@ impl Rooms {
                 }
             }
 
-            let new_state = apply.call_once((&state, room));
+            let new_state = apply(&state, room);
 
             match self.state.compare_exchange_weak(x, new_state.to_stored_state(),
                                                    success_ordering,
@@ -178,7 +178,7 @@ impl Rooms {
         }
     }
 
-    fn change_state<F>(&self, apply: F, room: i32, success_ordering: Ordering) -> Result<(), RoomAcquireError> where F: FnOnce(&State, i32) -> State + Copy {
+    fn change_state<F>(&self, apply: F, room: i32, success_ordering: Ordering) -> Result<(), RoomAcquireError> where F: Fn(&State, i32) -> State + Copy {
         let x = self.state.load(Ordering::Relaxed);
 
         let state = State::from_stored_state(x);
@@ -192,7 +192,7 @@ impl Rooms {
             }
         }
 
-        let new_state = apply.call_once((&state, room));
+        let new_state = apply(&state, room);
 
         return match self.state.compare_exchange_weak(x, new_state.to_stored_state(),
                                                       success_ordering,

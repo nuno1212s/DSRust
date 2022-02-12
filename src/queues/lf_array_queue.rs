@@ -42,7 +42,7 @@ pub struct LFBQueue<T> {
     one_lap: usize,
 }
 
-unsafe impl<T: Send> Sync for LFBQueue<T> {}
+unsafe impl<T> Sync for LFBQueue<T> {}
 
 impl<T> LFBQueue<T> {
     pub fn new(capacity: usize) -> Self {
