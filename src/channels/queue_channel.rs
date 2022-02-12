@@ -19,122 +19,6 @@ use crate::queues::mqueue::MQueue;
 use crate::queues::queues::{Queue, QueueError};
 use crate::queues::rooms_array_queue::LFBRArrayQueue;
 
-pub struct ChannelTx<T, Z> where
-    Z: Queue<T> + Sync {
-    inner: Sender<T, Z>,
-}
-
-pub struct ChannelRx<T, Z> where
-    Z: Queue<T> + Sync {
-    inner: Receiver<T, Z>,
-}
-
-pub struct ChannelRxFut<'a, T, Z> where
-    Z: Queue<T> + Sync {
-    inner: &'a mut Receiver<T, Z>,
-}
-
-pub struct ChannelRxMult<T, Z> where
-    Z: Queue<T> + Sync {
-    inner: ReceiverMult<T, Z>,
-}
-
-pub struct ChannelRxMultFut<'a, T, Z> where
-    Z: Queue<T> + Sync {
-    inner: &'a mut ReceiverMult<T, Z>,
-}
-
-impl<T, Z> ChannelTx<T, Z> where
-    Z: Queue<T> + Sync {
-    #[inline]
-    pub async fn send(&self, message: T) -> Result<(), SendError<T>> {
-        self.inner.send_async(message).await
-    }
-
-    #[inline]
-    pub fn send_blk(&self, message: T) -> Result<(), SendError<T>> {
-        self.inner.send(message)
-    }
-}
-
-impl<T, Z> ChannelRx<T, Z> where
-    Z: Queue<T> + Sync {
-    ///Async receiver with no backoff (Turns straight to event notifications)
-    #[inline]
-    pub fn recv<'a>(&'a mut self) -> ChannelRxFut<'a, T, Z> {
-        let inner = &mut self.inner;
-
-        ChannelRxFut { inner }
-    }
-}
-
-impl<T, Z> ChannelRxMult<T,Z> where Z: Queue<T> + Sync {
-    ///Async receiver with no backoff (Turns straight to event notifications)
-    #[inline]
-    pub fn recv<'a>(&'a mut self) -> ChannelRxMultFut<'a, T, Z> {
-        let inner = &mut self.inner;
-
-        ChannelRxMultFut { inner }
-    }
-}
-
-impl<T, Z> Clone for ChannelRx<T, Z> where
-    Z: Queue<T> + Sync {
-    fn clone(&self) -> Self {
-        Self {
-            inner: Receiver::new(self.inner.inner.clone()),
-        }
-    }
-}
-
-impl<T, Z> Clone for ChannelTx<T, Z> where
-    Z: Queue<T> + Sync {
-    fn clone(&self) -> Self {
-        Self {
-            inner: Sender::new(self.inner.inner.clone()),
-        }
-    }
-}
-
-impl<'a, T, Z> Future for ChannelRxFut<'a, T, Z> where
-    Z: Queue<T> + Sync {
-    type Output = Result<T, RecvError>;
-
-    #[inline]
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.inner)
-            .poll_next(cx)
-            .map(|opt| opt.ok_or(RecvError))
-    }
-}
-
-impl<'a, T, Z> FusedFuture for ChannelRxFut<'a, T, Z> where
-    Z: Queue<T> + Sync {
-    fn is_terminated(&self) -> bool {
-        self.inner.is_terminated()
-    }
-}
-
-///Receiver to use with the dump method
-impl<'a, T, Z> Future for ChannelRxMultFut<'a, T, Z> where
-    Z: Queue<T> + Sync {
-    type Output = Result<Vec<T>, RecvError>;
-
-    #[inline]
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.inner)
-            .poll_next(cx)
-            .map(|opt| opt.ok_or(RecvError))
-    }
-}
-
-impl<'a, T, Z> FusedFuture for ChannelRxMultFut<'a, T, Z> where
-    Z: Queue<T> + Sync {
-    fn is_terminated(&self) -> bool {
-        self.inner.is_terminated()
-    }
-}
-
 ///Inner classes, handle the futures abstractions
 pub struct Sender<T, Z> where
     Z: Queue<T> + Sync {
@@ -326,6 +210,14 @@ impl<T, Z> Receiver<T, Z> where
 impl<T, Z> Unpin for Receiver<T, Z> where
     Z: Queue<T> + Sync {}
 
+impl<T, Z> Clone for Receiver<T, Z> where
+    Z: Queue<T> + Sync {
+    fn clone(&self) -> Self {
+        Self::new(self.inner.clone())
+    }
+}
+}
+
 ///Implement the stream for the receiver
 impl<T, Z> Stream for Receiver<T, Z> where
     Z: Queue<T> + Sync {
@@ -412,13 +304,6 @@ impl<T, Z> FusedStream for Receiver<T, Z> where Z: Queue<T> + Sync {
     }
 }
 
-impl<T, Z> Clone for Receiver<T, Z> where
-    Z: Queue<T> + Sync {
-    fn clone(&self) -> Self {
-        return Self::new(self.inner.clone());
-    }
-}
-
 //Custom receiver that will receive multiple elements at a time
 impl<T, Z> ReceiverMult<T, Z> where Z: Queue<T> + Sync {
     fn new(inner: Arc<ReceivingInner<T, Z>>) -> Self {
@@ -483,7 +368,6 @@ impl<T, Z> Stream for ReceiverMult<T, Z> where Z: Queue<T> + Sync {
 
             self.allocated = Some(allocated_vec);
         }
-
     }
 }
 
@@ -902,7 +786,7 @@ impl<T, Z> Inner<T, Z> where
     }
 }
 
-enum RecvMultError {
+pub enum RecvMultError {
     MalformedInputVec,
     Disconnected,
 }
@@ -935,13 +819,11 @@ impl std::fmt::Display for RecvMultError {
 
 impl Error for RecvMultError {}
 
-pub fn make_mult_recv_from<T, Z>(recv: ChannelRx<T, Z>) -> ChannelRxMult<T, Z> where Z: Queue<T> + Sync {
-    ChannelRxMult {
-        inner: ReceiverMult::new(recv.inner.inner)
-    }
+pub fn make_mult_recv_from<T, Z>(recv: Receiver<T, Z>) -> ReceiverMult<T, Z> where Z: Queue<T> + Sync {
+    ReceiverMult::new(recv.inner)
 }
 
-pub fn bounded_lf_queue<T>(capacity: usize) -> (ChannelTx<T, LFBQueue<T>>, ChannelRx<T, LFBQueue<T>>)
+pub fn bounded_lf_queue<T>(capacity: usize) -> (Sender<T, LFBQueue<T>>, Receiver<T, LFBQueue<T>>)
     where {
     let inner = Inner::new(LFBQueue::new(capacity));
 
@@ -949,8 +831,8 @@ pub fn bounded_lf_queue<T>(capacity: usize) -> (ChannelTx<T, LFBQueue<T>>, Chann
     let sending_arc = SendingInner::new(inner_arc.clone());
     let receiving_arc = ReceivingInner::new(inner_arc);
 
-    (ChannelTx { inner: Sender::new(Arc::new(sending_arc)) },
-     ChannelRx { inner: Receiver::new(Arc::new(receiving_arc)) })
+    (Sender::new(Arc::new(sending_arc)),
+     Receiver::new(Arc::new(receiving_arc)))
 }
 
 pub fn bounded_lf_room_queue<T>(capacity: usize) -> (ChannelTx<T, LFBRArrayQueue<T>>, ChannelRx<T, LFBRArrayQueue<T>>)
@@ -961,8 +843,8 @@ pub fn bounded_lf_room_queue<T>(capacity: usize) -> (ChannelTx<T, LFBRArrayQueue
     let sending_arc = SendingInner::new(inner_arc.clone());
     let receiving_arc = ReceivingInner::new(inner_arc);
 
-    (ChannelTx { inner: Sender::new(Arc::new(sending_arc)) },
-     ChannelRx { inner: Receiver::new(Arc::new(receiving_arc)) })
+    (Sender::new(Arc::new(sending_arc)),
+     Receiver::new(Arc::new(receiving_arc)))
 }
 
 pub fn bounded_mutex_backoff_queue<T>(capacity: usize) -> (ChannelTx<T, MQueue<T>>, ChannelRx<T, MQueue<T>>)
@@ -973,8 +855,8 @@ pub fn bounded_mutex_backoff_queue<T>(capacity: usize) -> (ChannelTx<T, MQueue<T
     let sending_arc = SendingInner::new(inner_arc.clone());
     let receiving_arc = ReceivingInner::new(inner_arc);
 
-    (ChannelTx { inner: Sender::new(Arc::new(sending_arc)) },
-     ChannelRx { inner: Receiver::new(Arc::new(receiving_arc)) })
+    (Sender::new(Arc::new(sending_arc)),
+     Receiver::new(Arc::new(receiving_arc)))
 }
 
 pub fn bounded_mutex_no_backoff_queue<T>(capacity: usize) -> (ChannelTx<T, MQueue<T>>, ChannelRx<T, MQueue<T>>)
@@ -985,6 +867,6 @@ pub fn bounded_mutex_no_backoff_queue<T>(capacity: usize) -> (ChannelTx<T, MQueu
     let sending_arc = SendingInner::new(inner_arc.clone());
     let receiving_arc = ReceivingInner::new(inner_arc);
 
-    (ChannelTx { inner: Sender::new(Arc::new(sending_arc)) },
-     ChannelRx { inner: Receiver::new(Arc::new(receiving_arc)) })
+    (Sender::new(Arc::new(sending_arc)),
+     Receiver::new(Arc::new(receiving_arc)))
 }

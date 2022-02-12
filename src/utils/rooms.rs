@@ -279,27 +279,18 @@ pub mod rooms_tests {
     fn test_rooms_sequential() {
         let rooms = Rooms::new(ROOMS);
 
-        println!("State {:?}", rooms.current_state());
-
         assert!(rooms.enter(ROOM_1).is_ok());
-        println!("State {:?}", rooms.current_state());
 
         assert!(rooms.enter(ROOM_2).is_err());
-        println!("State {:?}", rooms.current_state());
 
         assert!(rooms.enter(ROOM_1).is_ok());
-        println!("State {:?}", rooms.current_state());
 
         assert!(rooms.leave(ROOM_1).is_ok());
-        println!("State {:?}", rooms.current_state());
         assert!(rooms.leave(ROOM_1).is_ok());
-        println!("State {:?}", rooms.current_state());
 
         assert!(rooms.enter(ROOM_2).is_ok());
-        println!("State {:?}", rooms.current_state());
 
         assert!(rooms.enter(ROOM_1).is_err());
-        println!("State {:?}", rooms.current_state());
     }
 
     #[test]
