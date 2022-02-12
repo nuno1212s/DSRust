@@ -372,13 +372,13 @@ impl<T, Z> Clone for Receiver<T, Z> where
 struct SendingInner<T, Z> where
     Z: Queue<T> + Sync {
     inner: Arc<Inner<T, Z>>,
-    phantom: PhantomData<T>,
+    phantom: PhantomData<fn() -> T>,
 }
 
 struct ReceivingInner<T, Z> where
     Z: Queue<T> + Sync {
     inner: Arc<Inner<T, Z>>,
-    phantom: PhantomData<T>,
+    phantom: PhantomData<fn() -> T>,
 }
 
 impl<T, Z> SendingInner<T, Z> where
@@ -679,7 +679,7 @@ struct Inner<T, Z> where
     awaiting_sending: CachePadded<AtomicU32>,
     waiting_reception: Event,
     waiting_sending: Event,
-    phantom: PhantomData<T>,
+    phantom: PhantomData<fn() -> T>,
 }
 
 impl<T, Z> Inner<T, Z> where
