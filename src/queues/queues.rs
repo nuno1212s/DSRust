@@ -12,7 +12,7 @@ pub trait SizableQueue {
 }
 
 /// FIFO blocking queue trait
-pub trait BQueue<T>: SizableQueue where T: Debug {
+pub trait BQueue<T>: SizableQueue where  {
     ///Enqueue an element into the tail of the queue
     /// Will block if there is no available space in the queue
     fn enqueue_blk(&self, elem: T);
@@ -23,7 +23,7 @@ pub trait BQueue<T>: SizableQueue where T: Debug {
 }
 
 ///FIFO non blocking queue trait
-pub trait Queue<T>: SizableQueue where T: Debug {
+pub trait Queue<T>: SizableQueue where  {
     ///Attempts to enqueue an element at the tail of the queue
     /// If the queue is already full and does not support any more elements,
     /// the function will not block
@@ -38,15 +38,27 @@ pub trait Queue<T>: SizableQueue where T: Debug {
     fn dump(&self, vec: &mut Vec<T>) -> Result<usize, QueueError<T>>;
 }
 
-#[derive(Debug)]
-pub enum QueueError<T> where T: Debug {
+pub enum QueueError<T> where  {
     QueueFull(T),
     MalformedInputVec,
 }
 
-impl<T> Error for QueueError<T> where T: Debug {}
+impl<T> Debug for QueueError<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            QueueError::QueueFull(_elem) => {
+                write!(f, "The queue is already full!")
+            }
+            QueueError::MalformedInputVec => {
+                write!(f, "The input vector is malformed")
+            }
+        }
+    }
+}
 
-impl<T> Display for QueueError<T> where T: Debug {
+impl<T> Error for QueueError<T> where  {}
+
+impl<T> Display for QueueError<T> where  {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "Failed to add element, queue is already full")
     }

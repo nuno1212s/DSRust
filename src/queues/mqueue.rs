@@ -1,10 +1,8 @@
 use std::cell::Cell;
-use std::fmt::Debug;
 
 use crossbeam_utils::Backoff;
 use parking_lot::{Condvar, Mutex};
 use crate::queues::queues::{BQueue, Queue, QueueError, SizableQueue};
-use crate::utils::memory_access::UnsafeWrapper;
 
 struct QueueData<T> {
     array: Cell<Vec<Option<T>>>,
@@ -109,7 +107,7 @@ impl<T> SizableQueue for MQueue<T> {
     }
 }
 
-impl<T> Queue<T> for MQueue<T> where T: Debug {
+impl<T> Queue<T> for MQueue<T> where {
     fn enqueue(&self, elem: T) -> Result<(), QueueError<T>> {
         if self.backoff() {
             let backoff = Backoff::new();
@@ -136,8 +134,8 @@ impl<T> Queue<T> for MQueue<T> where T: Debug {
 
                         let index = (head + size) as usize % self.capacity();
 
-                        vector.get_mut(index).unwrap()
-                            .insert(elem);
+                        *vector.get_mut(index).unwrap() =
+                            Some(elem);
 
                         drop(lock_guard);
 
@@ -163,8 +161,8 @@ impl<T> Queue<T> for MQueue<T> where T: Debug {
 
             lock_guard.size += 1;
 
-            lock_guard.array().get_mut((size + head) % self.capacity()).unwrap()
-                .insert(elem);
+            *lock_guard.array().get_mut((size + head) % self.capacity()).unwrap()
+                = Some(elem);
 
             //Since we have added more members to the queue, notify the threads that
             //Are waiting for members to remove
@@ -306,7 +304,7 @@ impl<T> Queue<T> for MQueue<T> where T: Debug {
     }
 }
 
-impl<T> BQueue<T> for MQueue<T> where T: Debug {
+impl<T> BQueue<T> for MQueue<T> where {
     fn enqueue_blk(&self, elem: T) {
         if self.backoff() {
             let backoff = Backoff::new();
@@ -330,7 +328,7 @@ impl<T> BQueue<T> for MQueue<T> where T: Debug {
 
                         let head = lock_guard.head();
 
-                        lock_guard.array().get_mut((head + size) % self.capacity()).unwrap().insert(elem);
+                        *lock_guard.array().get_mut((head + size) % self.capacity()).unwrap() = Some(elem);
 
                         drop(lock_guard);
                         break;
@@ -354,7 +352,7 @@ impl<T> BQueue<T> for MQueue<T> where T: Debug {
             let head = lock_guard.head();
             lock_guard.size += 1;
 
-            lock_guard.array().get_mut((size + head) % self.capacity()).unwrap().insert(elem);
+            *lock_guard.array().get_mut((size + head) % self.capacity()).unwrap() = Some(elem);
 
             //Notify the threads that are waiting for the notification to pop an item
             //We notify_all because since the OS is not deterministic and if it only wakes up a thread

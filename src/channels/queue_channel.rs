@@ -1,9 +1,8 @@
 use std::error::Error;
-use std::fmt::{Debug, Formatter, write};
+use std::fmt::{Debug, Formatter};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::ops::Deref;
-use std::path::Display;
 use std::pin::Pin;
 use std::stream::Stream;
 use std::sync::Arc;
@@ -13,38 +12,42 @@ use std::task::{Context, Poll};
 
 use crossbeam_utils::{Backoff, CachePadded};
 use event_listener::{Event, EventListener};
-use fastrand::usize;
 
 use crate::queues::lf_array_queue::LFBQueue;
 use crate::queues::mqueue::MQueue;
 use crate::queues::queues::{Queue, QueueError};
 use crate::queues::rooms_array_queue::LFBRArrayQueue;
 
-pub struct ChannelTx<T, Z> where T: Debug,
-                                 Z: Queue<T> + Sync {
+pub struct ChannelTx<T, Z> where
+    Z: Queue<T> + Sync {
     inner: Sender<T, Z>,
 }
 
-pub struct ChannelRx<T, Z> where T: Debug,
-                                 Z: Queue<T> + Sync {
+pub struct ChannelRx<T, Z> where
+    Z: Queue<T> + Sync {
     inner: Receiver<T, Z>,
 }
 
-pub struct ChannelRxFut<'a, T, Z> where T: Debug,
-                                        Z: Queue<T> + Sync {
+pub struct ChannelRxFut<'a, T, Z> where
+    Z: Queue<T> + Sync {
     inner: &'a mut Receiver<T, Z>,
 }
 
-impl<T, Z> ChannelTx<T, Z> where T: Debug,
-                                 Z: Queue<T> + Sync {
+impl<T, Z> ChannelTx<T, Z> where
+    Z: Queue<T> + Sync {
     #[inline]
-    pub async fn send(&mut self, message: T) -> Result<(), SendError<T>> {
+    pub async fn send(&self, message: T) -> Result<(), SendError<T>> {
         self.inner.send_async(message).await
+    }
+
+    #[inline]
+    pub fn send_blk(&self, message: T) -> Result<(), SendError<T>> {
+        self.inner.send(message)
     }
 }
 
-impl<T, Z> ChannelRx<T, Z> where T: Debug,
-                                 Z: Queue<T> + Sync {
+impl<T, Z> ChannelRx<T, Z> where
+    Z: Queue<T> + Sync {
     ///Async receiver with no backoff (Turns straight to event notifications)
     #[inline]
     pub fn recv<'a>(&'a mut self) -> ChannelRxFut<'a, T, Z> {
@@ -123,8 +126,8 @@ impl<T, Z> ChannelRx<T, Z> where T: Debug,
     }
 }
 
-impl<'a, T, Z> Future for ChannelRxFut<'a, T, Z> where T: Debug,
-                                                       Z: Queue<T> + Sync {
+impl<'a, T, Z> Future for ChannelRxFut<'a, T, Z> where
+    Z: Queue<T> + Sync {
     type Output = Result<T, RecvError>;
 
     #[inline]
@@ -135,21 +138,21 @@ impl<'a, T, Z> Future for ChannelRxFut<'a, T, Z> where T: Debug,
     }
 }
 
-pub struct Sender<T, Z> where T: Debug,
-                              Z: Queue<T> + Sync {
+pub struct Sender<T, Z> where
+    Z: Queue<T> + Sync {
     inner: Arc<SendingInner<T, Z>>,
     phantom: PhantomData<T>,
 }
 
-pub struct Receiver<T, Z> where T: Debug,
-                                Z: Queue<T> + Sync {
+pub struct Receiver<T, Z> where
+    Z: Queue<T> + Sync {
     inner: Arc<ReceivingInner<T, Z>>,
     phantom: PhantomData<T>,
     listener: Option<EventListener>,
 }
 
-impl<T, Z> Sender<T, Z> where T: Debug,
-                              Z: Queue<T> + Sync {
+impl<T, Z> Sender<T, Z> where
+    Z: Queue<T> + Sync {
     fn new(inner: Arc<SendingInner<T, Z>>) -> Self {
         Self {
             inner,
@@ -294,15 +297,15 @@ impl<T, Z> Sender<T, Z> where T: Debug,
     }
 }
 
-impl<T, Z> Clone for Sender<T, Z> where T: Debug,
-                                        Z: Queue<T> + Sync {
+impl<T, Z> Clone for Sender<T, Z> where
+    Z: Queue<T> + Sync {
     fn clone(&self) -> Self {
         return Self::new(self.inner.clone());
     }
 }
 
-impl<T, Z> Receiver<T, Z> where T: Debug,
-                                Z: Queue<T> + Sync {
+impl<T, Z> Receiver<T, Z> where
+    Z: Queue<T> + Sync {
     fn new(inner: Arc<ReceivingInner<T, Z>>) -> Self {
         Self {
             inner,
@@ -312,12 +315,12 @@ impl<T, Z> Receiver<T, Z> where T: Debug,
     }
 }
 
-impl<T, Z> Unpin for Receiver<T, Z> where T: Debug,
-                                          Z: Queue<T> + Sync {}
+impl<T, Z> Unpin for Receiver<T, Z> where
+    Z: Queue<T> + Sync {}
 
 ///Implement the stream for the receiver
-impl<T, Z> Stream for Receiver<T, Z> where T: Debug,
-                                           Z: Queue<T> + Sync {
+impl<T, Z> Stream for Receiver<T, Z> where
+    Z: Queue<T> + Sync {
     type Item = T;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -354,8 +357,8 @@ impl<T, Z> Stream for Receiver<T, Z> where T: Debug,
     }
 }
 
-impl<T, Z> Clone for Receiver<T, Z> where T: Debug,
-                                          Z: Queue<T> + Sync {
+impl<T, Z> Clone for Receiver<T, Z> where
+    Z: Queue<T> + Sync {
     fn clone(&self) -> Self {
         return Self::new(self.inner.clone());
     }
@@ -366,20 +369,20 @@ impl<T, Z> Clone for Receiver<T, Z> where T: Debug,
 ///having to count them, as when this sending inner
 ///gets disposed of, it means that no other processes
 ///Are listening, so the channel is effectively closed
-struct SendingInner<T, Z> where T: Debug,
-                                Z: Queue<T> + Sync {
+struct SendingInner<T, Z> where
+    Z: Queue<T> + Sync {
     inner: Arc<Inner<T, Z>>,
     phantom: PhantomData<T>,
 }
 
-struct ReceivingInner<T, Z> where T: Debug,
-                                  Z: Queue<T> + Sync {
+struct ReceivingInner<T, Z> where
+    Z: Queue<T> + Sync {
     inner: Arc<Inner<T, Z>>,
     phantom: PhantomData<T>,
 }
 
-impl<T, Z> SendingInner<T, Z> where T: Debug,
-                                    Z: Queue<T> + Sync {
+impl<T, Z> SendingInner<T, Z> where
+    Z: Queue<T> + Sync {
     fn new(inner: Arc<Inner<T, Z>>) -> Self {
         Self {
             inner,
@@ -388,8 +391,8 @@ impl<T, Z> SendingInner<T, Z> where T: Debug,
     }
 }
 
-impl<T, Z> ReceivingInner<T, Z> where T: Debug,
-                                      Z: Queue<T> + Sync {
+impl<T, Z> ReceivingInner<T, Z> where
+    Z: Queue<T> + Sync {
     fn new(inner: Arc<Inner<T, Z>>) -> Self {
         Self {
             inner,
@@ -567,6 +570,8 @@ impl<T, Z> ReceivingInner<T, Z> where T: Debug,
                 }
 
                 self.inner.awaiting_sending.fetch_sub(1, Ordering::Release);
+
+                return ret;
             } else {
                 backoff.snooze();
             }
@@ -614,6 +619,8 @@ impl<T, Z> ReceivingInner<T, Z> where T: Debug,
                 }
 
                 self.inner.awaiting_sending.fetch_sub(1, Ordering::Release);
+
+                return ret;
             } else {
                 backoff.snooze();
             }
@@ -621,8 +628,8 @@ impl<T, Z> ReceivingInner<T, Z> where T: Debug,
     }
 }
 
-impl<T, Z> Deref for ReceivingInner<T, Z> where T: Debug,
-                                                Z: Queue<T> + Sync {
+impl<T, Z> Deref for ReceivingInner<T, Z> where
+    Z: Queue<T> + Sync {
     type Target = Arc<Inner<T, Z>>;
 
     fn deref(&self) -> &Self::Target {
@@ -630,8 +637,8 @@ impl<T, Z> Deref for ReceivingInner<T, Z> where T: Debug,
     }
 }
 
-impl<T, Z> Drop for ReceivingInner<T, Z> where T: Debug,
-                                               Z: Queue<T> + Sync {
+impl<T, Z> Drop for ReceivingInner<T, Z> where
+    Z: Queue<T> + Sync {
     fn drop(&mut self) {
         self.inner.is_dc.store(true, Ordering::Relaxed);
 
@@ -641,8 +648,8 @@ impl<T, Z> Drop for ReceivingInner<T, Z> where T: Debug,
     }
 }
 
-impl<T, Z> Deref for SendingInner<T, Z> where T: Debug,
-                                              Z: Queue<T> + Sync {
+impl<T, Z> Deref for SendingInner<T, Z> where
+    Z: Queue<T> + Sync {
     type Target = Arc<Inner<T, Z>>;
 
     fn deref(&self) -> &Self::Target {
@@ -650,8 +657,8 @@ impl<T, Z> Deref for SendingInner<T, Z> where T: Debug,
     }
 }
 
-impl<T, Z> Drop for SendingInner<T, Z> where T: Debug,
-                                             Z: Queue<T> + Sync {
+impl<T, Z> Drop for SendingInner<T, Z> where
+    Z: Queue<T> + Sync {
     fn drop(&mut self) {
         self.inner.is_dc.store(true, Ordering::Relaxed);
 
@@ -661,13 +668,13 @@ impl<T, Z> Drop for SendingInner<T, Z> where T: Debug,
     }
 }
 
-struct Inner<T, Z> where T: Debug,
-                         Z: Queue<T> + Sync {
+struct Inner<T, Z> where
+    Z: Queue<T> + Sync {
     queue: Z,
     //Is the channel disconnected
     is_dc: AtomicBool,
     //Sleeping event to allow threads that are waiting for a request
-    //To go to sleep efficiently
+//To go to sleep efficiently
     awaiting_reception: CachePadded<AtomicU32>,
     awaiting_sending: CachePadded<AtomicU32>,
     waiting_reception: Event,
@@ -675,8 +682,8 @@ struct Inner<T, Z> where T: Debug,
     phantom: PhantomData<T>,
 }
 
-impl<T, Z> Inner<T, Z> where T: Debug,
-                             Z: Queue<T> + Sync {
+impl<T, Z> Inner<T, Z> where
+    Z: Queue<T> + Sync {
     fn new(queue: Z) -> Self {
         Self {
             queue,
@@ -724,7 +731,7 @@ impl std::fmt::Display for RecvMultError {
 impl Error for RecvMultError {}
 
 pub fn bounded_lf_queue<T>(capacity: usize) -> (ChannelTx<T, LFBQueue<T>>, ChannelRx<T, LFBQueue<T>>)
-    where T: Debug {
+    where {
     let inner = Inner::new(LFBQueue::new(capacity));
 
     let inner_arc = Arc::new(inner);
@@ -736,7 +743,7 @@ pub fn bounded_lf_queue<T>(capacity: usize) -> (ChannelTx<T, LFBQueue<T>>, Chann
 }
 
 pub fn bounded_lf_room_queue<T>(capacity: usize) -> (ChannelTx<T, LFBRArrayQueue<T>>, ChannelRx<T, LFBRArrayQueue<T>>)
-    where T: Debug {
+    where {
     let inner = Inner::new(LFBRArrayQueue::new(capacity));
 
     let inner_arc = Arc::new(inner);
@@ -748,7 +755,7 @@ pub fn bounded_lf_room_queue<T>(capacity: usize) -> (ChannelTx<T, LFBRArrayQueue
 }
 
 pub fn bounded_mutex_backoff_queue<T>(capacity: usize) -> (ChannelTx<T, MQueue<T>>, ChannelRx<T, MQueue<T>>)
-    where T: Debug {
+    where {
     let inner = Inner::new(MQueue::new(capacity, true));
 
     let inner_arc = Arc::new(inner);
@@ -760,7 +767,7 @@ pub fn bounded_mutex_backoff_queue<T>(capacity: usize) -> (ChannelTx<T, MQueue<T
 }
 
 pub fn bounded_mutex_no_backoff_queue<T>(capacity: usize) -> (ChannelTx<T, MQueue<T>>, ChannelRx<T, MQueue<T>>)
-    where T: Debug {
+    where {
     let inner = Inner::new(MQueue::new(capacity, false));
 
     let inner_arc = Arc::new(inner);

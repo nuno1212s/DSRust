@@ -1,5 +1,4 @@
 use std::cell::UnsafeCell;
-use std::fmt::Debug;
 use std::mem::MaybeUninit;
 use std::sync::atomic;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -131,7 +130,7 @@ impl<T> SizableQueue for LFBQueue<T> {
 }
 
 ///Non blocking implementation for ArrayBQueue
-impl<T> Queue<T> for LFBQueue<T> where T: Debug {
+impl<T> Queue<T> for LFBQueue<T> where  {
     fn enqueue(&self, elem: T) -> Result<(), QueueError<T>> {
         let backoff = Backoff::new();
 
@@ -337,7 +336,7 @@ impl<T> Queue<T> for LFBQueue<T> where T: Debug {
     }
 }
 
-impl<T> BQueue<T> for LFBQueue<T> where T: Debug {
+impl<T> BQueue<T> for LFBQueue<T> where  {
     fn enqueue_blk(&self, elem: T) {
         let backoff = Backoff::new();
 

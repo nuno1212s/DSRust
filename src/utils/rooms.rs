@@ -55,25 +55,6 @@ impl State {
         };
     }
 
-    pub fn currently_inside(&self) -> i32 {
-        match self {
-            State::FREE => { -1 }
-            State::OCCUPIED { currently_inside, .. } => {
-                currently_inside.clone() as i32
-            }
-        }
-    }
-
-    pub fn room_nr(&self) -> i32 {
-        match self {
-            State::FREE => { -1 }
-            State::OCCUPIED { room_nr, .. } => {
-                *room_nr as i32
-            }
-        }
-    }
-
-
     pub fn enter(&self, new_room_nr: i32) -> Self {
         match self {
             State::FREE => {
@@ -131,11 +112,6 @@ impl Rooms {
             state: CachePadded::new(AtomicU64::new(0)),
             room_count,
         }
-    }
-
-    fn current_state(&self) -> State {
-        State::from_stored_state(
-            self.state.load(Ordering::Relaxed))
     }
 
     pub fn room_count(&self) -> u32 {
