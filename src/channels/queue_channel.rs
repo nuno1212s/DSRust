@@ -336,6 +336,7 @@ impl<T, Z> Stream for Receiver<T, Z> where
             if let Some(ev_listener) = self.listener.as_mut() {
                 futures_core::ready!(Pin::new(ev_listener).poll(cx));
 
+                self.inner.awaiting_sending.fetch_sub(1, Ordering::Relaxed);
                 self.listener = Option::None;
             }
 
@@ -354,6 +355,7 @@ impl<T, Z> Stream for Receiver<T, Z> where
                     Err(TryRecvError::Empty) => {
                         match self.listener.as_mut() {
                             None => {
+                                self.inner.awaiting_sending.fetch_add(1, Ordering::Relaxed);
                                 self.listener = Some(self.inner.waiting_sending.listen());
                             }
                             Some(_) => { break; }
@@ -373,6 +375,7 @@ impl<T, Z> futures_core::Stream for Receiver<T, Z> where Z: Queue<T> + Sync {
             if let Some(ev_listener) = self.listener.as_mut() {
                 futures_core::ready!(Pin::new(ev_listener).poll(cx));
 
+                self.inner.awaiting_sending.fetch_sub(1, Ordering::Relaxed);
                 self.listener = Option::None;
             }
 
@@ -391,6 +394,7 @@ impl<T, Z> futures_core::Stream for Receiver<T, Z> where Z: Queue<T> + Sync {
                     Err(TryRecvError::Empty) => {
                         match self.listener.as_mut() {
                             None => {
+                                self.inner.awaiting_sending.fetch_add(1, Ordering::Relaxed);
                                 self.listener = Some(self.inner.waiting_sending.listen());
                             }
                             Some(_) => { break; }
@@ -438,6 +442,7 @@ impl<T, Z> Stream for ReceiverMult<T, Z> where Z: Queue<T> + Sync {
             if let Some(ev_listener) = self.listener.as_mut() {
                 futures_core::ready!(Pin::new(ev_listener).poll(cx));
 
+                self.inner.awaiting_sending.fetch_sub(1, Ordering::Relaxed);
                 self.listener = Option::None;
             }
 
@@ -459,6 +464,7 @@ impl<T, Z> Stream for ReceiverMult<T, Z> where Z: Queue<T> + Sync {
                         } else {
                             match self.listener.as_mut() {
                                 None => {
+                                    self.inner.awaiting_sending.fetch_add(1, Ordering::Relaxed);
                                     self.listener = Some(self.inner.waiting_sending.listen());
                                 }
                                 Some(_) => { break; }
@@ -489,6 +495,7 @@ impl<T, Z> futures_core::Stream for ReceiverMult<T, Z> where Z: Queue<T> + Sync 
             if let Some(ev_listener) = self.listener.as_mut() {
                 futures_core::ready!(Pin::new(ev_listener).poll(cx));
 
+                self.inner.awaiting_sending.fetch_sub(1, Ordering::Relaxed);
                 self.listener = Option::None;
             }
 
@@ -510,6 +517,7 @@ impl<T, Z> futures_core::Stream for ReceiverMult<T, Z> where Z: Queue<T> + Sync 
                         } else {
                             match self.listener.as_mut() {
                                 None => {
+                                    self.inner.awaiting_sending.fetch_add(1, Ordering::Relaxed);
                                     self.listener = Some(self.inner.waiting_sending.listen());
                                 }
                                 Some(_) => { break; }
