@@ -12,6 +12,7 @@ use std::task::{Context, Poll};
 
 use crossbeam_utils::{Backoff, CachePadded};
 use event_listener::{Event, EventListener};
+use futures_core::{FusedFuture, FusedStream};
 
 use crate::queues::lf_array_queue::LFBQueue;
 use crate::queues::mqueue::MQueue;
@@ -31,6 +32,16 @@ pub struct ChannelRx<T, Z> where
 pub struct ChannelRxFut<'a, T, Z> where
     Z: Queue<T> + Sync {
     inner: &'a mut Receiver<T, Z>,
+}
+
+pub struct ChannelRxMult<T, Z> where
+    Z: Queue<T> + Sync {
+    inner: ReceiverMult<T, Z>,
+}
+
+pub struct ChannelRxMultFut<'a, T, Z> where
+    Z: Queue<T> + Sync {
+    inner: &'a mut ReceiverMult<T, Z>,
 }
 
 impl<T, Z> ChannelTx<T, Z> where
@@ -55,74 +66,33 @@ impl<T, Z> ChannelRx<T, Z> where
 
         ChannelRxFut { inner }
     }
+}
 
-    ///Blocking receiver with backoff and event notification on backoff complete
+impl<T, Z> ChannelRxMult<T,Z> where Z: Queue<T> + Sync {
+    ///Async receiver with no backoff (Turns straight to event notifications)
     #[inline]
-    pub fn recv_backoff(&self) -> Result<T, RecvError> {
-        self.inner.inner.recv()
+    pub fn recv<'a>(&'a mut self) -> ChannelRxMultFut<'a, T, Z> {
+        let inner = &mut self.inner;
+
+        ChannelRxMultFut { inner }
     }
+}
 
-    ///Async receiver with backoff and async event notification on backoff complete
-    #[inline]
-    pub async fn recv_async_backoff(&self) -> Result<T, RecvError> {
-        self.inner.inner.recv_async().await
+impl<T, Z> Clone for ChannelRx<T, Z> where
+    Z: Queue<T> + Sync {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Receiver::new(self.inner.inner.clone()),
+        }
     }
+}
 
-    ///A blocking receiver with backoff and event notification on backoff complete
-    #[inline]
-    pub fn recv_mult_with_target(&self, target: &mut Vec<T>) -> Result<usize, RecvError> {
-        return match self.inner.inner.recv_mult(target) {
-            Ok(std) => {
-                Ok(std)
-            }
-            Err(_) => {
-                Err(RecvError)
-            }
-        };
-    }
-
-    ///A blocking receiver with backoff and event notification on backoff complete
-    #[inline]
-    pub fn recv_mult(&self) -> Result<Vec<T>, RecvError> {
-        let mut target = Vec::with_capacity(self.inner.inner.queue.capacity().unwrap_or(1024));
-
-        return match self.inner.inner.recv_mult(&mut target) {
-            Ok(_) => {
-                Ok(target)
-            }
-            Err(_) => {
-                Err(RecvError)
-            }
-        };
-    }
-
-
-    ///Async receiver with backoff and async event notification on backoff complete
-    #[inline]
-    pub async fn recv_mult_with_target_async(&self, target: &mut Vec<T>) -> Result<usize, RecvError> {
-        return match self.inner.inner.recv_mult_async(target).await {
-            Ok(std) => {
-                Ok(std)
-            }
-            Err(_) => {
-                Err(RecvError)
-            }
-        };
-    }
-
-    ///Async receiver with backoff and async event notification on backoff complete
-    #[inline]
-    pub async fn recv_mult_async(&self) -> Result<Vec<T>, RecvError> {
-        let mut target = Vec::with_capacity(self.inner.inner.queue.capacity().unwrap_or(1024));
-
-        return match self.inner.inner.recv_mult_async(&mut target).await {
-            Ok(_) => {
-                Ok(target)
-            }
-            Err(_) => {
-                Err(RecvError)
-            }
-        };
+impl<T, Z> Clone for ChannelTx<T, Z> where
+    Z: Queue<T> + Sync {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Sender::new(self.inner.inner.clone()),
+        }
     }
 }
 
@@ -138,19 +108,55 @@ impl<'a, T, Z> Future for ChannelRxFut<'a, T, Z> where
     }
 }
 
+impl<'a, T, Z> FusedFuture for ChannelRxFut<'a, T, Z> where
+    Z: Queue<T> + Sync {
+    fn is_terminated(&self) -> bool {
+        self.inner.is_terminated()
+    }
+}
+
+///Receiver to use with the dump method
+impl<'a, T, Z> Future for ChannelRxMultFut<'a, T, Z> where
+    Z: Queue<T> + Sync {
+    type Output = Result<Vec<T>, RecvError>;
+
+    #[inline]
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.inner)
+            .poll_next(cx)
+            .map(|opt| opt.ok_or(RecvError))
+    }
+}
+
+impl<'a, T, Z> FusedFuture for ChannelRxMultFut<'a, T, Z> where
+    Z: Queue<T> + Sync {
+    fn is_terminated(&self) -> bool {
+        self.inner.is_terminated()
+    }
+}
+
+///Inner classes, handle the futures abstractions
 pub struct Sender<T, Z> where
     Z: Queue<T> + Sync {
     inner: Arc<SendingInner<T, Z>>,
-    phantom: PhantomData<T>,
+    phantom: PhantomData<fn() -> T>,
 }
 
 pub struct Receiver<T, Z> where
     Z: Queue<T> + Sync {
     inner: Arc<ReceivingInner<T, Z>>,
-    phantom: PhantomData<T>,
+    phantom: PhantomData<fn() -> T>,
     listener: Option<EventListener>,
 }
 
+pub struct ReceiverMult<T, Z> where
+    Z: Queue<T> + Sync {
+    inner: Arc<ReceivingInner<T, Z>>,
+    listener: Option<EventListener>,
+    allocated: Option<Vec<T>>,
+}
+
+///Sender implementation
 impl<T, Z> Sender<T, Z> where
     Z: Queue<T> + Sync {
     fn new(inner: Arc<SendingInner<T, Z>>) -> Self {
@@ -190,7 +196,7 @@ impl<T, Z> Sender<T, Z> where
         }
     }
 
-    fn send(&self, mut obj: T) -> Result<(), SendError<T>> {
+    pub(crate) fn send(&self, mut obj: T) -> Result<(), SendError<T>> {
         let backoff = Backoff::new();
 
         loop {
@@ -242,7 +248,7 @@ impl<T, Z> Sender<T, Z> where
         }
     }
 
-    async fn send_async(&self, elem: T) -> Result<(), SendError<T>> {
+    pub(crate) async fn send_async(&self, elem: T) -> Result<(), SendError<T>> {
         let backoff = Backoff::new();
 
         let mut obj = elem;
@@ -304,6 +310,8 @@ impl<T, Z> Clone for Sender<T, Z> where
     }
 }
 
+///Standard one by one receiver
+/// Implements Streams and FusedFutures
 impl<T, Z> Receiver<T, Z> where
     Z: Queue<T> + Sync {
     fn new(inner: Arc<ReceivingInner<T, Z>>) -> Self {
@@ -357,7 +365,179 @@ impl<T, Z> Stream for Receiver<T, Z> where
     }
 }
 
+impl<T, Z> futures_core::Stream for Receiver<T, Z> where Z: Queue<T> + Sync {
+    type Item = T;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            if let Some(ev_listener) = self.listener.as_mut() {
+                futures_core::ready!(Pin::new(ev_listener).poll(cx));
+
+                self.listener = Option::None;
+            }
+
+            loop {
+                match self.inner.try_recv() {
+                    Ok(msg) => {
+                        self.listener = None;
+
+                        return Poll::Ready(Some(msg));
+                    }
+                    Err(TryRecvError::Disconnected) => {
+                        self.listener = None;
+
+                        return Poll::Ready(None);
+                    }
+                    Err(TryRecvError::Empty) => {
+                        match self.listener.as_mut() {
+                            None => {
+                                self.listener = Some(self.inner.waiting_sending.listen());
+                            }
+                            Some(_) => { break; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<T, Z> FusedStream for Receiver<T, Z> where Z: Queue<T> + Sync {
+    fn is_terminated(&self) -> bool {
+        self.inner.is_dc.load(Ordering::Relaxed)
+    }
+}
+
 impl<T, Z> Clone for Receiver<T, Z> where
+    Z: Queue<T> + Sync {
+    fn clone(&self) -> Self {
+        return Self::new(self.inner.clone());
+    }
+}
+
+//Custom receiver that will receive multiple elements at a time
+impl<T, Z> ReceiverMult<T, Z> where Z: Queue<T> + Sync {
+    fn new(inner: Arc<ReceivingInner<T, Z>>) -> Self {
+        Self {
+            inner,
+            listener: None,
+            allocated: None,
+        }
+    }
+}
+
+
+impl<T, Z> Unpin for ReceiverMult<T, Z> where
+    Z: Queue<T> + Sync {}
+
+impl<T, Z> Stream for ReceiverMult<T, Z> where Z: Queue<T> + Sync {
+    type Item = Vec<T>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            if let Some(ev_listener) = self.listener.as_mut() {
+                futures_core::ready!(Pin::new(ev_listener).poll(cx));
+
+                self.listener = Option::None;
+            }
+
+            let mut allocated_vec: Vec<T>;
+
+            if let Some(vec) = self.allocated.take() {
+                allocated_vec = vec;
+            } else {
+                allocated_vec = Vec::with_capacity(self.inner.queue.capacity().unwrap_or(1024));
+            }
+
+            loop {
+                match self.inner.try_recv_mult(&mut allocated_vec) {
+                    Ok(msg) => {
+                        if msg > 0 {
+                            self.listener = None;
+
+                            return Poll::Ready(Some(allocated_vec));
+                        } else {
+                            match self.listener.as_mut() {
+                                None => {
+                                    self.listener = Some(self.inner.waiting_sending.listen());
+                                }
+                                Some(_) => { break; }
+                            }
+                        }
+                    }
+                    Err(RecvMultError::Disconnected) => {
+                        self.listener = None;
+                        self.allocated = Some(allocated_vec);
+
+                        return Poll::Ready(None);
+                    }
+                    Err(RecvMultError::MalformedInputVec) => {}
+                }
+            }
+
+            self.allocated = Some(allocated_vec);
+        }
+
+    }
+}
+
+impl<T, Z> futures_core::Stream for ReceiverMult<T, Z> where Z: Queue<T> + Sync {
+    type Item = Vec<T>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            if let Some(ev_listener) = self.listener.as_mut() {
+                futures_core::ready!(Pin::new(ev_listener).poll(cx));
+
+                self.listener = Option::None;
+            }
+
+            let mut allocated_vec: Vec<T>;
+
+            if let Some(vec) = self.allocated.take() {
+                allocated_vec = vec;
+            } else {
+                allocated_vec = Vec::with_capacity(self.inner.queue.capacity().unwrap_or(1024));
+            }
+
+            loop {
+                match self.inner.try_recv_mult(&mut allocated_vec) {
+                    Ok(msg) => {
+                        if msg > 0 {
+                            self.listener = None;
+
+                            return Poll::Ready(Some(allocated_vec));
+                        } else {
+                            match self.listener.as_mut() {
+                                None => {
+                                    self.listener = Some(self.inner.waiting_sending.listen());
+                                }
+                                Some(_) => { break; }
+                            }
+                        }
+                    }
+                    Err(RecvMultError::Disconnected) => {
+                        self.listener = None;
+                        self.allocated = Some(allocated_vec);
+
+                        return Poll::Ready(None);
+                    }
+                    Err(RecvMultError::MalformedInputVec) => {}
+                }
+            }
+
+            self.allocated = Some(allocated_vec);
+        }
+    }
+}
+
+impl<T, Z> FusedStream for ReceiverMult<T, Z> where Z: Queue<T> + Sync {
+    fn is_terminated(&self) -> bool {
+        self.inner.is_dc.load(Ordering::Relaxed)
+    }
+}
+
+impl<T, Z> Clone for ReceiverMult<T, Z> where
     Z: Queue<T> + Sync {
     fn clone(&self) -> Self {
         return Self::new(self.inner.clone());
@@ -529,6 +709,23 @@ impl<T, Z> ReceivingInner<T, Z> where
         }
     }
 
+    pub fn try_recv_mult(&self, vec: &mut Vec<T>) -> Result<usize, RecvMultError> {
+        if self.inner.is_dc.load(Ordering::Relaxed) {
+            return Err(RecvMultError::Disconnected);
+        }
+
+        loop {
+            match self.inner.queue.dump(vec) {
+                Ok(amount) => {
+                    return Ok(amount);
+                }
+                Err(_) => {
+                    return Err(RecvMultError::MalformedInputVec);
+                }
+            };
+        }
+    }
+
     pub fn recv_mult(&self, vec: &mut Vec<T>) -> Result<usize, RecvMultError> {
         if self.inner.is_dc.load(Ordering::Relaxed) {
             return Err(RecvMultError::Disconnected);
@@ -670,7 +867,7 @@ impl<T, Z> Drop for SendingInner<T, Z> where
 
 struct Inner<T, Z> where
     Z: Queue<T> + Sync {
-    queue: Z,
+    pub(crate) queue: Z,
     //Is the channel disconnected
     is_dc: AtomicBool,
     //Sleeping event to allow threads that are waiting for a request
@@ -729,6 +926,12 @@ impl std::fmt::Display for RecvMultError {
 }
 
 impl Error for RecvMultError {}
+
+pub fn make_mult_recv_from<T, Z>(recv: ChannelRx<T, Z>) -> ChannelRxMult<T, Z> where Z: Queue<T> + Sync {
+    ChannelRxMult {
+        inner: ReceiverMult::new(recv.inner.inner)
+    }
+}
 
 pub fn bounded_lf_queue<T>(capacity: usize) -> (ChannelTx<T, LFBQueue<T>>, ChannelRx<T, LFBQueue<T>>)
     where {
