@@ -7,7 +7,7 @@ use std::sync::mpsc::{RecvError, TryRecvError};
 use std::task::{Context, Poll};
 
 use event_listener::EventListener;
-use futures_core::FusedStream;
+use futures_core::{FusedFuture, FusedStream};
 
 use crate::channels::queue_channel::{Receiver, ReceiverMult, RecvMultError};
 use crate::queues::queues::Queue;
@@ -77,6 +77,12 @@ impl<'a, T, Z> Future for ReceiverFut<'a, T, Z> where Z: Queue<T> {
                 }
             }
         }
+    }
+}
+
+impl<'a, T, Z> FusedFuture for ReceiverFut<'a, T, Z> where Z: Queue<T> {
+    fn is_terminated(&self) -> bool {
+        self.receiver.inner.is_dc.load(Ordering::Relaxed) && self.receiver.inner.queue.is_empty()
     }
 }
 
@@ -248,6 +254,12 @@ impl<'a, T, Z> Future for ReceiverMultFut<'a, T, Z> where Z: Queue<T> {
                 }
             }
         }
+    }
+}
+
+impl<'a, T, Z> FusedFuture for ReceiverMultFut<'a, T, Z> where Z: Queue<T> {
+    fn is_terminated(&self) -> bool {
+        self.receiver.inner.is_dc.load(Ordering::Relaxed) && self.receiver.inner.queue.is_empty()
     }
 }
 
