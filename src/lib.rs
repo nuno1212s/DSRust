@@ -5,6 +5,7 @@ pub mod tests {
         pub mod queuetests;
         pub mod queuebench;
         pub mod channelbench;
+        pub mod channeltests;
     }
 
     pub mod utils {
@@ -32,4 +33,5 @@ pub mod queues {
 
 pub mod channels {
     pub mod queue_channel;
+    pub mod async_ch;
 }

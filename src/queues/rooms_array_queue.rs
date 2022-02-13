@@ -30,12 +30,6 @@ pub struct LFBRArrayQueue<T> {
 
 impl<T> LFBRArrayQueue<T> {
     pub fn new(expected_size: usize) -> Self {
-        let mut vec = Vec::with_capacity(expected_size);
-
-        for _ in 0..expected_size {
-            vec.push(Option::None);
-        }
-
         //Always use the next power of two, so when we have overflow on the
         //Head and tail, since we always % capacity, the indexes won't be
         //Screwed up!
@@ -44,6 +38,12 @@ impl<T> LFBRArrayQueue<T> {
         } else {
             expected_size
         };
+
+        let mut vec = Vec::with_capacity(capacity);
+
+        for _ in 0..capacity {
+            vec.push(Option::None);
+        }
 
         Self {
             array: UnsafeWrapper::new(vec),
@@ -55,7 +55,7 @@ impl<T> LFBRArrayQueue<T> {
         }
     }
 
-    pub fn capacity(&self) -> usize {
+    fn inner_cap(&self) -> usize {
         self.capacity
     }
 }
@@ -96,7 +96,7 @@ impl<T> SizableQueue for LFBRArrayQueue<T> {
 
         self.rooms.leave_blk_ordered(SIZE_ROOM, Ordering::Relaxed).unwrap();
 
-        size == self.capacity()
+        size == self.inner_cap()
     }
 }
 
@@ -111,7 +111,7 @@ impl<T> SizableQueue for LFBRArrayQueue<T> {
 /// So, by using Acquire when entering the room and release when leaving the rooms,
 /// We know for a fact that readers will have access to all changes performed by writers and vice versa
 /// And we have relaxed the memory barriers to improve performance
-impl<T> Queue<T> for LFBRArrayQueue<T> where  {
+impl<T> Queue<T> for LFBRArrayQueue<T> {
     fn enqueue(&self, elem: T) -> Result<(), QueueError<T>> {
         if self.is_full.load(Ordering::Relaxed) {
             //if the array is already full, we don't have to try to enter the room,
@@ -130,16 +130,16 @@ impl<T> Queue<T> for LFBRArrayQueue<T> where  {
         let head = self.head.load(Ordering::Relaxed);
 
         //We have not exceeded capacity so we can still add the value
-        if prev_tail - head < self.capacity() {
+        if prev_tail - head < self.inner_cap() {
             unsafe {
                 let array_mut = &mut *self.array.get();
 
-                *array_mut.get_mut(prev_tail as usize % self.capacity()).unwrap() = Some(elem);
+                *array_mut.get_mut(prev_tail as usize % self.inner_cap()).unwrap() = Some(elem);
             }
 
             //In case the element we have inserted is the last one,
             //Close the door behind us
-            if (prev_tail - head) + 1 >= self.capacity() {
+            if (prev_tail - head) + 1 >= self.inner_cap() {
                 self.is_full.store(true, Ordering::Relaxed);
             }
 
@@ -168,7 +168,7 @@ impl<T> Queue<T> for LFBRArrayQueue<T> where  {
         let prev_head = self.head.fetch_add(1, Ordering::Relaxed);
 
         if prev_head < self.tail.load(Ordering::Relaxed) {
-            let pos = prev_head % self.capacity();
+            let pos = prev_head % self.inner_cap();
 
             unsafe {
                 let array_mut = &mut *self.array.get();
@@ -193,7 +193,7 @@ impl<T> Queue<T> for LFBRArrayQueue<T> where  {
     }
 
     fn dump(&self, vec: &mut Vec<T>) -> Result<usize, QueueError<T>> {
-        if vec.capacity() < self.capacity() {
+        if vec.capacity() < self.inner_cap() {
             return Err(MalformedInputVec);
         }
 
@@ -213,7 +213,7 @@ impl<T> Queue<T> for LFBRArrayQueue<T> where  {
 
                 //Move the values into the new vector
                 for pos in prev_head..current_tail {
-                    vec.push(x.get_mut(pos % self.capacity()).unwrap().take().unwrap());
+                    vec.push(x.get_mut(pos % self.inner_cap()).unwrap().take().unwrap());
                 }
             }
 
@@ -254,18 +254,18 @@ impl<T> BQueue<T> for LFBRArrayQueue<T> where  {
             //So we have access to the modifications the previous reader did to the memory
             let head = self.head.load(Ordering::Relaxed);
 
-            if prev_tail - head < self.capacity() {
+            if prev_tail - head < self.inner_cap() {
                 unsafe {
                     let array_mut = &mut *self.array.get();
 
-                    *array_mut.get_mut(prev_tail as usize % self.capacity()).unwrap() = Some(elem);
+                    *array_mut.get_mut(prev_tail as usize % self.inner_cap()).unwrap() = Some(elem);
                 }
 
                 self.rooms.leave_blk_ordered(ADD_ROOM, Ordering::Release).unwrap();
 
                 //In case the element we have inserted is the last one,
                 //Close the door behind us
-                if (prev_tail - head) + 1 >= self.capacity() {
+                if (prev_tail - head) + 1 >= self.inner_cap() {
                     self.is_full.store(true, Ordering::Relaxed);
                 }
 
@@ -291,7 +291,7 @@ impl<T> BQueue<T> for LFBRArrayQueue<T> where  {
             let prev_head = self.head.fetch_add(1, Ordering::Relaxed);
 
             if prev_head < self.tail.load(Ordering::Relaxed) {
-                let pos = prev_head % self.capacity();
+                let pos = prev_head % self.inner_cap();
 
                 unsafe {
                     let array_mut = &mut *self.array.get();

@@ -1,18 +1,13 @@
 use std::error::Error;
 use std::fmt::{Debug, Formatter};
-use std::future::Future;
 use std::marker::PhantomData;
 use std::ops::Deref;
-use std::pin::Pin;
-use std::stream::Stream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{RecvError, SendError, TryRecvError, TrySendError};
-use std::task::{Context, Poll};
 
 use crossbeam_utils::{Backoff, CachePadded};
 use event_listener::{Event, EventListener};
-use futures_core::{FusedFuture, FusedStream};
 
 use crate::queues::lf_array_queue::LFBQueue;
 use crate::queues::mqueue::MQueue;
@@ -28,16 +23,16 @@ pub struct Sender<T, Z> where
 
 pub struct Receiver<T, Z> where
     Z: Queue<T> + Sync {
-    inner: Arc<ReceivingInner<T, Z>>,
+    pub(crate) inner: Arc<ReceivingInner<T, Z>>,
     phantom: PhantomData<fn() -> T>,
-    listener: Option<EventListener>,
+    pub(crate) listener: Option<EventListener>,
 }
 
 pub struct ReceiverMult<T, Z> where
     Z: Queue<T> + Sync {
-    inner: Arc<ReceivingInner<T, Z>>,
-    listener: Option<EventListener>,
-    allocated: Option<Vec<T>>,
+    pub(crate) inner: Arc<ReceivingInner<T, Z>>,
+    pub(crate) listener: Option<EventListener>,
+    pub(crate) allocated: Option<Vec<T>>,
 }
 
 ///Sender implementation
@@ -195,7 +190,6 @@ impl<T, Z> Clone for Sender<T, Z> where
 }
 
 ///Standard one by one receiver
-/// Implements Streams and FusedFutures
 impl<T, Z> Receiver<T, Z> where
     Z: Queue<T> + Sync {
     fn new(inner: Arc<ReceivingInner<T, Z>>) -> Self {
@@ -203,272 +197,6 @@ impl<T, Z> Receiver<T, Z> where
             inner,
             phantom: PhantomData::default(),
             listener: Option::None,
-        }
-    }
-}
-
-impl<T, Z> Unpin for Receiver<T, Z> where
-    Z: Queue<T> + Sync {}
-
-impl<T, Z> Clone for Receiver<T, Z> where
-    Z: Queue<T> + Sync {
-    fn clone(&self) -> Self {
-        Self::new(self.inner.clone())
-    }
-}
-}
-
-///Implement the stream for the receiver
-impl<T, Z> Stream for Receiver<T, Z> where
-    Z: Queue<T> + Sync {
-    type Item = T;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            if let Some(ev_listener) = self.listener.as_mut() {
-                futures_core::ready!(Pin::new(ev_listener).poll(cx));
-
-                self.inner.awaiting_sending.fetch_sub(1, Ordering::Relaxed);
-                self.listener = Option::None;
-            }
-
-            loop {
-                match self.inner.try_recv() {
-                    Ok(msg) => {
-                        self.listener = None;
-
-                        return Poll::Ready(Some(msg));
-                    }
-                    Err(TryRecvError::Disconnected) => {
-                        self.listener = None;
-
-                        return Poll::Ready(None);
-                    }
-                    Err(TryRecvError::Empty) => {
-                        match self.listener.as_mut() {
-                            None => {
-                                self.inner.awaiting_sending.fetch_add(1, Ordering::Relaxed);
-                                self.listener = Some(self.inner.waiting_sending.listen());
-                            }
-                            Some(_) => { break; }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-impl<T, Z> futures_core::Stream for Receiver<T, Z> where Z: Queue<T> + Sync {
-    type Item = T;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            if let Some(ev_listener) = self.listener.as_mut() {
-                futures_core::ready!(Pin::new(ev_listener).poll(cx));
-
-                self.inner.awaiting_sending.fetch_sub(1, Ordering::Relaxed);
-                self.listener = Option::None;
-            }
-
-            loop {
-                match self.inner.try_recv() {
-                    Ok(msg) => {
-                        self.listener = None;
-
-                        return Poll::Ready(Some(msg));
-                    }
-                    Err(TryRecvError::Disconnected) => {
-                        self.listener = None;
-
-                        return Poll::Ready(None);
-                    }
-                    Err(TryRecvError::Empty) => {
-                        match self.listener.as_mut() {
-                            None => {
-                                self.inner.awaiting_sending.fetch_add(1, Ordering::Relaxed);
-                                self.listener = Some(self.inner.waiting_sending.listen());
-                            }
-                            Some(_) => { break; }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-impl<T, Z> FusedStream for Receiver<T, Z> where Z: Queue<T> + Sync {
-    fn is_terminated(&self) -> bool {
-        self.inner.is_dc.load(Ordering::Relaxed)
-    }
-}
-
-//Custom receiver that will receive multiple elements at a time
-impl<T, Z> ReceiverMult<T, Z> where Z: Queue<T> + Sync {
-    fn new(inner: Arc<ReceivingInner<T, Z>>) -> Self {
-        Self {
-            inner,
-            listener: None,
-            allocated: None,
-        }
-    }
-}
-
-
-impl<T, Z> Unpin for ReceiverMult<T, Z> where
-    Z: Queue<T> + Sync {}
-
-impl<T, Z> Stream for ReceiverMult<T, Z> where Z: Queue<T> + Sync {
-    type Item = Vec<T>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            if let Some(ev_listener) = self.listener.as_mut() {
-                futures_core::ready!(Pin::new(ev_listener).poll(cx));
-
-                self.inner.awaiting_sending.fetch_sub(1, Ordering::Relaxed);
-                self.listener = Option::None;
-            }
-
-            let mut allocated_vec: Vec<T>;
-
-            if let Some(vec) = self.allocated.take() {
-                allocated_vec = vec;
-            } else {
-                allocated_vec = Vec::with_capacity(self.inner.queue.capacity().unwrap_or(1024));
-            }
-
-            loop {
-                match self.inner.try_recv_mult(&mut allocated_vec) {
-                    Ok(msg) => {
-                        if msg > 0 {
-                            self.listener = None;
-
-                            return Poll::Ready(Some(allocated_vec));
-                        } else {
-                            match self.listener.as_mut() {
-                                None => {
-                                    self.inner.awaiting_sending.fetch_add(1, Ordering::Relaxed);
-                                    self.listener = Some(self.inner.waiting_sending.listen());
-                                }
-                                Some(_) => { break; }
-                            }
-                        }
-                    }
-                    Err(RecvMultError::Disconnected) => {
-                        self.listener = None;
-                        self.allocated = Some(allocated_vec);
-
-                        return Poll::Ready(None);
-                    }
-                    Err(RecvMultError::MalformedInputVec) => {}
-                }
-            }
-
-            self.allocated = Some(allocated_vec);
-        }
-    }
-}
-
-impl<T, Z> futures_core::Stream for ReceiverMult<T, Z> where Z: Queue<T> + Sync {
-    type Item = Vec<T>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            if let Some(ev_listener) = self.listener.as_mut() {
-                futures_core::ready!(Pin::new(ev_listener).poll(cx));
-
-                self.inner.awaiting_sending.fetch_sub(1, Ordering::Relaxed);
-                self.listener = Option::None;
-            }
-
-            let mut allocated_vec: Vec<T>;
-
-            if let Some(vec) = self.allocated.take() {
-                allocated_vec = vec;
-            } else {
-                allocated_vec = Vec::with_capacity(self.inner.queue.capacity().unwrap_or(1024));
-            }
-
-            loop {
-                match self.inner.try_recv_mult(&mut allocated_vec) {
-                    Ok(msg) => {
-                        if msg > 0 {
-                            self.listener = None;
-
-                            return Poll::Ready(Some(allocated_vec));
-                        } else {
-                            match self.listener.as_mut() {
-                                None => {
-                                    self.inner.awaiting_sending.fetch_add(1, Ordering::Relaxed);
-                                    self.listener = Some(self.inner.waiting_sending.listen());
-                                }
-                                Some(_) => { break; }
-                            }
-                        }
-                    }
-                    Err(RecvMultError::Disconnected) => {
-                        self.listener = None;
-                        self.allocated = Some(allocated_vec);
-
-                        return Poll::Ready(None);
-                    }
-                    Err(RecvMultError::MalformedInputVec) => {}
-                }
-            }
-
-            self.allocated = Some(allocated_vec);
-        }
-    }
-}
-
-impl<T, Z> FusedStream for ReceiverMult<T, Z> where Z: Queue<T> + Sync {
-    fn is_terminated(&self) -> bool {
-        self.inner.is_dc.load(Ordering::Relaxed)
-    }
-}
-
-impl<T, Z> Clone for ReceiverMult<T, Z> where
-    Z: Queue<T> + Sync {
-    fn clone(&self) -> Self {
-        return Self::new(self.inner.clone());
-    }
-}
-
-///We have this extra abstractions so we can keep
-///Count of how many sending clone there are without
-///having to count them, as when this sending inner
-///gets disposed of, it means that no other processes
-///Are listening, so the channel is effectively closed
-struct SendingInner<T, Z> where
-    Z: Queue<T> + Sync {
-    inner: Arc<Inner<T, Z>>,
-    phantom: PhantomData<fn() -> T>,
-}
-
-struct ReceivingInner<T, Z> where
-    Z: Queue<T> + Sync {
-    inner: Arc<Inner<T, Z>>,
-    phantom: PhantomData<fn() -> T>,
-}
-
-impl<T, Z> SendingInner<T, Z> where
-    Z: Queue<T> + Sync {
-    fn new(inner: Arc<Inner<T, Z>>) -> Self {
-        Self {
-            inner,
-            phantom: PhantomData::default(),
-        }
-    }
-}
-
-impl<T, Z> ReceivingInner<T, Z> where
-    Z: Queue<T> + Sync {
-    fn new(inner: Arc<Inner<T, Z>>) -> Self {
-        Self {
-            inner,
-            phantom: PhantomData::default(),
         }
     }
 
@@ -497,7 +225,7 @@ impl<T, Z> ReceivingInner<T, Z> where
         };
     }
 
-    pub fn recv(&self) -> Result<T, RecvError> {
+    pub fn recv_blk(&self) -> Result<T, RecvError> {
         let backoff = Backoff::new();
 
         loop {
@@ -549,7 +277,7 @@ impl<T, Z> ReceivingInner<T, Z> where
         }
     }
 
-    pub async fn recv_async(&self) -> Result<T, RecvError> {
+    pub async fn recv_async_basic(&self) -> Result<T, RecvError> {
         let backoff = Backoff::new();
 
         loop {
@@ -598,6 +326,27 @@ impl<T, Z> ReceivingInner<T, Z> where
             } else {
                 backoff.snooze();
             }
+        }
+    }
+}
+
+impl<T, Z> Unpin for Receiver<T, Z> where
+    Z: Queue<T> + Sync {}
+
+impl<T, Z> Clone for Receiver<T, Z> where
+    Z: Queue<T> + Sync {
+    fn clone(&self) -> Self {
+        Self::new(self.inner.clone())
+    }
+}
+
+//Custom receiver that will receive multiple elements at a time
+impl<T, Z> ReceiverMult<T, Z> where Z: Queue<T> + Sync {
+    fn new(inner: Arc<ReceivingInner<T, Z>>) -> Self {
+        Self {
+            inner,
+            listener: None,
+            allocated: None,
         }
     }
 
@@ -717,6 +466,53 @@ impl<T, Z> ReceivingInner<T, Z> where
     }
 }
 
+impl<T, Z> Unpin for ReceiverMult<T, Z> where
+    Z: Queue<T> + Sync {}
+
+impl<T, Z> Clone for ReceiverMult<T, Z> where
+    Z: Queue<T> + Sync {
+    fn clone(&self) -> Self {
+        return Self::new(self.inner.clone());
+    }
+}
+
+///We have this extra abstractions so we can keep
+///Count of how many sending clone there are without
+///having to count them, as when this sending inner
+///gets disposed of, it means that no other processes
+///Are listening, so the channel is effectively closed
+pub struct SendingInner<T, Z> where
+    Z: Queue<T> + Sync {
+    inner: Arc<Inner<T, Z>>,
+    phantom: PhantomData<fn() -> T>,
+}
+
+pub struct ReceivingInner<T, Z> where
+    Z: Queue<T> + Sync {
+    inner: Arc<Inner<T, Z>>,
+    phantom: PhantomData<fn() -> T>,
+}
+
+impl<T, Z> SendingInner<T, Z> where
+    Z: Queue<T> + Sync {
+    fn new(inner: Arc<Inner<T, Z>>) -> Self {
+        Self {
+            inner,
+            phantom: PhantomData::default(),
+        }
+    }
+}
+
+impl<T, Z> ReceivingInner<T, Z> where
+    Z: Queue<T> + Sync {
+    fn new(inner: Arc<Inner<T, Z>>) -> Self {
+        Self {
+            inner,
+            phantom: PhantomData::default(),
+        }
+    }
+}
+
 impl<T, Z> Deref for ReceivingInner<T, Z> where
     Z: Queue<T> + Sync {
     type Target = Arc<Inner<T, Z>>;
@@ -729,11 +525,7 @@ impl<T, Z> Deref for ReceivingInner<T, Z> where
 impl<T, Z> Drop for ReceivingInner<T, Z> where
     Z: Queue<T> + Sync {
     fn drop(&mut self) {
-        self.inner.is_dc.store(true, Ordering::Relaxed);
-
-        //Notify all waiting processes that the queue is now closed
-        self.inner.waiting_sending.notify(usize::MAX);
-        self.inner.waiting_reception.notify(usize::MAX);
+        self.inner.close();
     }
 }
 
@@ -749,25 +541,21 @@ impl<T, Z> Deref for SendingInner<T, Z> where
 impl<T, Z> Drop for SendingInner<T, Z> where
     Z: Queue<T> + Sync {
     fn drop(&mut self) {
-        self.inner.is_dc.store(true, Ordering::Relaxed);
-
-        //Notify all waiting processes that the queue is now closed
-        self.inner.waiting_sending.notify(usize::MAX);
-        self.inner.waiting_reception.notify(usize::MAX);
+        self.inner.close();
     }
 }
 
-struct Inner<T, Z> where
+pub struct Inner<T, Z> where
     Z: Queue<T> + Sync {
     pub(crate) queue: Z,
     //Is the channel disconnected
-    is_dc: AtomicBool,
+    pub(crate) is_dc: AtomicBool,
     //Sleeping event to allow threads that are waiting for a request
 //To go to sleep efficiently
     awaiting_reception: CachePadded<AtomicU32>,
-    awaiting_sending: CachePadded<AtomicU32>,
+    pub(crate) awaiting_sending: CachePadded<AtomicU32>,
     waiting_reception: Event,
-    waiting_sending: Event,
+    pub(crate) waiting_sending: Event,
     phantom: PhantomData<fn() -> T>,
 }
 
@@ -783,6 +571,13 @@ impl<T, Z> Inner<T, Z> where
             waiting_sending: Event::new(),
             phantom: PhantomData::default(),
         }
+    }
+
+    fn close(&self) {
+        self.is_dc.store(true, Ordering::Relaxed);
+
+        self.waiting_sending.notify(usize::MAX);
+        self.waiting_reception.notify(usize::MAX);
     }
 }
 
@@ -835,7 +630,7 @@ pub fn bounded_lf_queue<T>(capacity: usize) -> (Sender<T, LFBQueue<T>>, Receiver
      Receiver::new(Arc::new(receiving_arc)))
 }
 
-pub fn bounded_lf_room_queue<T>(capacity: usize) -> (ChannelTx<T, LFBRArrayQueue<T>>, ChannelRx<T, LFBRArrayQueue<T>>)
+pub fn bounded_lf_room_queue<T>(capacity: usize) -> (Sender<T, LFBRArrayQueue<T>>, Receiver<T, LFBRArrayQueue<T>>)
     where {
     let inner = Inner::new(LFBRArrayQueue::new(capacity));
 
@@ -847,7 +642,7 @@ pub fn bounded_lf_room_queue<T>(capacity: usize) -> (ChannelTx<T, LFBRArrayQueue
      Receiver::new(Arc::new(receiving_arc)))
 }
 
-pub fn bounded_mutex_backoff_queue<T>(capacity: usize) -> (ChannelTx<T, MQueue<T>>, ChannelRx<T, MQueue<T>>)
+pub fn bounded_mutex_backoff_queue<T>(capacity: usize) -> (Sender<T, MQueue<T>>, Receiver<T, MQueue<T>>)
     where {
     let inner = Inner::new(MQueue::new(capacity, true));
 
@@ -859,7 +654,7 @@ pub fn bounded_mutex_backoff_queue<T>(capacity: usize) -> (ChannelTx<T, MQueue<T
      Receiver::new(Arc::new(receiving_arc)))
 }
 
-pub fn bounded_mutex_no_backoff_queue<T>(capacity: usize) -> (ChannelTx<T, MQueue<T>>, ChannelRx<T, MQueue<T>>)
+pub fn bounded_mutex_no_backoff_queue<T>(capacity: usize) -> (Sender<T, MQueue<T>>, Receiver<T, MQueue<T>>)
     where {
     let inner = Inner::new(MQueue::new(capacity, false));
 

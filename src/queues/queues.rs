@@ -12,7 +12,7 @@ pub trait SizableQueue {
 }
 
 /// FIFO blocking queue trait
-pub trait BQueue<T>: SizableQueue where  {
+pub trait BQueue<T>: SizableQueue + Sync  {
     ///Enqueue an element into the tail of the queue
     /// Will block if there is no available space in the queue
     fn enqueue_blk(&self, elem: T);
@@ -23,7 +23,7 @@ pub trait BQueue<T>: SizableQueue where  {
 }
 
 ///FIFO non blocking queue trait
-pub trait Queue<T>: SizableQueue where  {
+pub trait Queue<T>: SizableQueue + Sync  {
     ///Attempts to enqueue an element at the tail of the queue
     /// If the queue is already full and does not support any more elements,
     /// the function will not block

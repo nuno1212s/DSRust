@@ -1,7 +1,7 @@
 use std::cell::UnsafeCell;
 
 pub struct UnsafeWrapper<T> {
-    array: UnsafeCell<T>
+    array: UnsafeCell<T>,
 }
 
 impl<T> UnsafeWrapper<T> {
@@ -21,3 +21,5 @@ impl<T> UnsafeWrapper<T> {
 }
 
 unsafe impl<T> Sync for UnsafeWrapper<T> {}
+
+unsafe impl<T> Send for UnsafeWrapper<T> {}

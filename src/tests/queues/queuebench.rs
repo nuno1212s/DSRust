@@ -307,7 +307,7 @@ pub mod queue_bench {
     pub fn bench_mpsc_blocking() {
         let capacity = 10000;
 
-        let operations = 10_000_000;
+        let operations = 1_000_000;
 
         let mut producer_threads = 2;
 

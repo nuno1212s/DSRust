@@ -51,7 +51,7 @@ impl Queue<u32> for ArrayQueue<u32> {
 #[cfg(test)]
 pub mod queue_tests {
     use std::sync::Arc;
-    use std::time::{Instant};
+    use std::time::Instant;
 
     use crossbeam_queue::ArrayQueue;
 
@@ -80,7 +80,10 @@ pub mod queue_tests {
         assert_eq!(current, count);
     }
 
-    fn test_single_thread_capacity_for<T>(queue: T, count: u32) where T: Queue<u32> {
+    fn test_single_thread_capacity_for<T>(queue: T, mut count: u32) where T: Queue<u32> {
+
+        if count < queue.capacity().unwrap() as u32 { count = queue.capacity().unwrap() as u32; }
+
         for i in 0..count {
             queue.enqueue(i).unwrap();
         }
