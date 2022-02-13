@@ -43,6 +43,8 @@ pub struct LFBQueue<T> {
 
 unsafe impl<T> Sync for LFBQueue<T> {}
 
+unsafe impl<T> Send for LFBQueue<T> {}
+
 impl<T> LFBQueue<T> {
     pub fn new(capacity: usize) -> Self {
         let buffer: Box<[StorageSlot<T>]> = (0..capacity)
@@ -130,7 +132,7 @@ impl<T> SizableQueue for LFBQueue<T> {
 }
 
 ///Non blocking implementation for ArrayBQueue
-impl<T> Queue<T> for LFBQueue<T> where  {
+impl<T> Queue<T> for LFBQueue<T> where {
     fn enqueue(&self, elem: T) -> Result<(), QueueError<T>> {
         let backoff = Backoff::new();
 
@@ -336,7 +338,7 @@ impl<T> Queue<T> for LFBQueue<T> where  {
     }
 }
 
-impl<T> BQueue<T> for LFBQueue<T> where  {
+impl<T> BQueue<T> for LFBQueue<T> where {
     fn enqueue_blk(&self, elem: T) {
         let backoff = Backoff::new();
 

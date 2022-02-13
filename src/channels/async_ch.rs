@@ -12,6 +12,7 @@ use futures_core::{FusedFuture, FusedStream};
 use crate::channels::queue_channel::{Receiver, ReceiverMult, RecvMultError};
 use crate::queues::queues::Queue;
 
+#[derive(Clone)]
 enum OwnedOrRef<'a, T> {
     Owned(T),
     Ref(&'a T),

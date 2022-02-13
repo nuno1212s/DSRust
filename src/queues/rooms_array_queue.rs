@@ -28,6 +28,8 @@ pub struct LFBRArrayQueue<T> {
     capacity: usize,
 }
 
+unsafe impl<T> Sync for LFBRArrayQueue<T> {}
+
 impl<T> LFBRArrayQueue<T> {
     pub fn new(expected_size: usize) -> Self {
         //Always use the next power of two, so when we have overflow on the
