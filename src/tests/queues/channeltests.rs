@@ -60,4 +60,21 @@ pub mod channeltests {
 
         join.join().unwrap();
     }
+
+    #[test]
+    pub fn test_channel_2_threads_async_mult() {
+        let (sender, receiver) = bounded_lf_room_queue(CAPACITY);
+
+        let join = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+
+            assert!(sender.send(Test(Rc::new(42))).is_ok());
+        });
+
+        async_std::task::block_on(async {
+            assert_eq!(*receiver.recv_fut().await.unwrap().0, 42);
+        });
+
+        join.join().unwrap();
+    }
 }

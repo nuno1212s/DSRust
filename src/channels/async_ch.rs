@@ -40,6 +40,11 @@ pub struct ReceiverMultFut<'a, T, Z> where Z: Queue<T> {
     allocated: Option<Vec<T>>,
 }
 
+//We need this because of the allocated variable, as it's a Vec<T> which
+//Requires T to be send. But allocated will always be empty if it's stored
+//in the allocated variable. When it's filled, it will instantly be returned
+unsafe impl<'a, T, Z> Send for ReceiverMultFut<'a, T, Z> where Z: Queue<T> {}
+
 impl<'a, T, Z> Unpin for ReceiverFut<'a, T, Z> where Z: Queue<T> {}
 
 impl<'a, T, Z> Future for ReceiverFut<'a, T, Z> where Z: Queue<T> {

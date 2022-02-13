@@ -101,6 +101,8 @@ impl State {
 /// Initially, the state is free.
 /// Whenever any thread joins a room X, no other thread can enter any other room Y, however any number of
 /// threads can enter the room X.
+/// TODO: Implement a notification system for when we are waiting longer
+/// periods of time
 pub struct Rooms {
     state: CachePadded<AtomicU64>,
     room_count: u32,
