@@ -16,20 +16,20 @@ use crate::queues::rooms_array_queue::LFBRArrayQueue;
 
 ///Inner classes, handle the futures abstractions
 pub struct Sender<T, Z> where
-    Z: Queue<T>  {
+    Z: Queue<T> {
     inner: Arc<SendingInner<T, Z>>,
     phantom: PhantomData<fn() -> T>,
 }
 
 pub struct Receiver<T, Z> where
-    Z: Queue<T>  {
+    Z: Queue<T> {
     pub(crate) inner: Arc<ReceivingInner<T, Z>>,
     phantom: PhantomData<fn() -> T>,
     pub(crate) listener: Option<EventListener>,
 }
 
 pub struct ReceiverMult<T, Z> where
-    Z: Queue<T>  {
+    Z: Queue<T> {
     pub(crate) inner: Arc<ReceivingInner<T, Z>>,
     pub(crate) listener: Option<EventListener>,
     pub(crate) allocated: Option<Vec<T>>,
@@ -37,7 +37,7 @@ pub struct ReceiverMult<T, Z> where
 
 ///Sender implementation
 impl<T, Z> Sender<T, Z> where
-    Z: Queue<T>  {
+    Z: Queue<T> {
     fn new(inner: Arc<SendingInner<T, Z>>) -> Self {
         Self {
             inner,
@@ -51,13 +51,13 @@ impl<T, Z> Sender<T, Z> where
 
     ///Only notifies the threads if there were any listeners registered
     fn notify_if_necessary(&self) {
-        if self.inner.awaiting_reception.load(Ordering::Acquire) > 0 {
-            self.inner.waiting_reception.notify_relaxed(usize::MAX);
+        if self.inner.awaiting_sending.load(Ordering::Acquire) > 0 {
+            self.inner.waiting_sending.notify_relaxed(usize::MAX);
         }
     }
 
     pub fn try_send(&self, obj: T) -> Result<(), TrySendError<T>> {
-        if self.inner.is_dc.load(Ordering::Relaxed) {
+        if self.inner.is_closed_send() {
             return Err(TrySendError::Disconnected(obj));
         }
 
@@ -187,7 +187,7 @@ impl<T, Z> Sender<T, Z> where
 }
 
 impl<T, Z> Clone for Sender<T, Z> where
-    Z: Queue<T>  {
+    Z: Queue<T> {
     fn clone(&self) -> Self {
         return Self::new(self.inner.clone());
     }
@@ -195,7 +195,7 @@ impl<T, Z> Clone for Sender<T, Z> where
 
 ///Standard one by one receiver
 impl<T, Z> Receiver<T, Z> where
-    Z: Queue<T>  {
+    Z: Queue<T> {
     fn new(inner: Arc<ReceivingInner<T, Z>>) -> Self {
         Self {
             inner,
@@ -215,7 +215,7 @@ impl<T, Z> Receiver<T, Z> where
     }
 
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        if self.inner.is_dc.load(Ordering::Relaxed) && self.inner.queue.is_empty() {
+        if self.inner.is_closed_recv() {
             //Test if the queue is empty so if the senders are disconnected,
             //We can still receive all the elements that are lacking in the list
             return Err(TryRecvError::Disconnected);
@@ -339,10 +339,10 @@ impl<T, Z> Receiver<T, Z> where
 }
 
 impl<T, Z> Unpin for Receiver<T, Z> where
-    Z: Queue<T>  {}
+    Z: Queue<T> {}
 
 impl<T, Z> Clone for Receiver<T, Z> where
-    Z: Queue<T>  {
+    Z: Queue<T> {
     fn clone(&self) -> Self {
         Self::new(self.inner.clone())
     }
@@ -359,7 +359,7 @@ impl<T, Z> ReceiverMult<T, Z> where Z: Queue<T> {
     }
 
     pub fn try_recv_mult(&self, vec: &mut Vec<T>) -> Result<usize, RecvMultError> {
-        if self.inner.is_dc.load(Ordering::Relaxed) {
+        if self.inner.is_closed_recv() {
             return Err(RecvMultError::Disconnected);
         }
 
@@ -376,7 +376,7 @@ impl<T, Z> ReceiverMult<T, Z> where Z: Queue<T> {
     }
 
     pub fn recv_mult(&self, vec: &mut Vec<T>) -> Result<usize, RecvMultError> {
-        if self.inner.is_dc.load(Ordering::Relaxed) {
+        if self.inner.is_closed_recv() {
             return Err(RecvMultError::Disconnected);
         }
 
@@ -425,7 +425,7 @@ impl<T, Z> ReceiverMult<T, Z> where Z: Queue<T> {
     }
 
     pub async fn recv_mult_async(&self, vec: &mut Vec<T>) -> Result<usize, RecvMultError> {
-        if self.inner.is_dc.load(Ordering::Relaxed) {
+        if self.inner.is_closed_recv() {
             return Err(RecvMultError::Disconnected);
         }
 
@@ -475,10 +475,10 @@ impl<T, Z> ReceiverMult<T, Z> where Z: Queue<T> {
 }
 
 impl<T, Z> Unpin for ReceiverMult<T, Z> where
-    Z: Queue<T>  {}
+    Z: Queue<T> {}
 
 impl<T, Z> Clone for ReceiverMult<T, Z> where
-    Z: Queue<T>  {
+    Z: Queue<T> {
     fn clone(&self) -> Self {
         return Self::new(self.inner.clone());
     }
@@ -490,19 +490,19 @@ impl<T, Z> Clone for ReceiverMult<T, Z> where
 ///gets disposed of, it means that no other processes
 ///Are listening, so the channel is effectively closed
 pub struct SendingInner<T, Z> where
-    Z: Queue<T>  {
+    Z: Queue<T> {
     inner: Arc<Inner<T, Z>>,
     phantom: PhantomData<fn() -> T>,
 }
 
 pub struct ReceivingInner<T, Z> where
-    Z: Queue<T>  {
+    Z: Queue<T> {
     inner: Arc<Inner<T, Z>>,
     phantom: PhantomData<fn() -> T>,
 }
 
 impl<T, Z> SendingInner<T, Z> where
-    Z: Queue<T>  {
+    Z: Queue<T> {
     fn new(inner: Arc<Inner<T, Z>>) -> Self {
         Self {
             inner,
@@ -512,7 +512,7 @@ impl<T, Z> SendingInner<T, Z> where
 }
 
 impl<T, Z> ReceivingInner<T, Z> where
-    Z: Queue<T>  {
+    Z: Queue<T> {
     fn new(inner: Arc<Inner<T, Z>>) -> Self {
         Self {
             inner,
@@ -522,7 +522,7 @@ impl<T, Z> ReceivingInner<T, Z> where
 }
 
 impl<T, Z> Deref for ReceivingInner<T, Z> where
-    Z: Queue<T>  {
+    Z: Queue<T> {
     type Target = Arc<Inner<T, Z>>;
 
     fn deref(&self) -> &Self::Target {
@@ -531,14 +531,14 @@ impl<T, Z> Deref for ReceivingInner<T, Z> where
 }
 
 impl<T, Z> Drop for ReceivingInner<T, Z> where
-    Z: Queue<T>  {
+    Z: Queue<T> {
     fn drop(&mut self) {
         self.inner.close();
     }
 }
 
 impl<T, Z> Deref for SendingInner<T, Z> where
-    Z: Queue<T>  {
+    Z: Queue<T> {
     type Target = Arc<Inner<T, Z>>;
 
     fn deref(&self) -> &Self::Target {
@@ -547,17 +547,17 @@ impl<T, Z> Deref for SendingInner<T, Z> where
 }
 
 impl<T, Z> Drop for SendingInner<T, Z> where
-    Z: Queue<T>  {
+    Z: Queue<T> {
     fn drop(&mut self) {
         self.inner.close();
     }
 }
 
 pub struct Inner<T, Z> where
-    Z: Queue<T>  {
-    pub(crate) queue: Z,
+    Z: Queue<T> {
+    queue: Z,
     //Is the channel disconnected
-    pub(crate) is_dc: AtomicBool,
+    is_dc: AtomicBool,
     //Sleeping event to allow threads that are waiting for a request
 //To go to sleep efficiently
     awaiting_reception: CachePadded<AtomicU32>,
@@ -568,7 +568,7 @@ pub struct Inner<T, Z> where
 }
 
 impl<T, Z> Inner<T, Z> where
-    Z: Queue<T>  {
+    Z: Queue<T> {
     fn new(queue: Z) -> Self {
         Self {
             queue,
@@ -579,6 +579,20 @@ impl<T, Z> Inner<T, Z> where
             waiting_sending: Event::new(),
             phantom: PhantomData::default(),
         }
+    }
+
+    ///Sends can only send when the queue is not closed
+    pub fn is_closed_send(&self) -> bool {
+        self.is_dc.load(Ordering::Relaxed)
+    }
+
+    ///Receivers are only closed when the queue is empty and there are no senders
+    pub fn is_closed_recv(&self) -> bool {
+        self.is_dc.load(Ordering::Relaxed) && self.queue.is_empty()
+    }
+
+    pub fn queue(&self) -> &Z {
+        &self.queue
     }
 
     fn close(&self) {
@@ -622,8 +636,8 @@ impl std::fmt::Display for RecvMultError {
 
 impl Error for RecvMultError {}
 
-pub fn make_mult_recv_from<T, Z>(recv: Receiver<T, Z>) -> ReceiverMult<T, Z> where Z: Queue<T> + Sync {
-    ReceiverMult::new(recv.inner)
+pub fn make_mult_recv_from<T, Z>(mut recv: Receiver<T, Z>) -> ReceiverMult<T, Z> where Z: Queue<T> + Sync {
+    ReceiverMult::new(Arc::clone(&recv.inner))
 }
 
 pub fn bounded_lf_queue<T>(capacity: usize) -> (Sender<T, LFBQueue<T>>, Receiver<T, LFBQueue<T>>)

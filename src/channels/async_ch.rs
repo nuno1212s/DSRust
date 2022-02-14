@@ -88,7 +88,7 @@ impl<'a, T, Z> Future for ReceiverFut<'a, T, Z> where Z: Queue<T> {
 
 impl<'a, T, Z> FusedFuture for ReceiverFut<'a, T, Z> where Z: Queue<T> {
     fn is_terminated(&self) -> bool {
-        self.receiver.inner.is_dc.load(Ordering::Relaxed) && self.receiver.inner.queue.is_empty()
+        self.receiver.inner.is_closed_recv()
     }
 }
 
@@ -190,7 +190,7 @@ impl<T, Z> futures_core::Stream for Receiver<T, Z> where Z: Queue<T> + Sync {
 
 impl<T, Z> FusedStream for Receiver<T, Z> where Z: Queue<T> + Sync {
     fn is_terminated(&self) -> bool {
-        self.inner.is_dc.load(Ordering::Relaxed)
+        self.inner.is_closed_recv()
     }
 }
 
@@ -222,7 +222,7 @@ impl<'a, T, Z> Future for ReceiverMultFut<'a, T, Z> where Z: Queue<T> {
         let mut this = Pin::new(self);
 
         let mut allocated = match this.allocated.take() {
-            None => { Vec::with_capacity(this.receiver.inner.queue.capacity().unwrap()) }
+            None => { Vec::with_capacity(this.receiver.inner.queue().capacity().unwrap()) }
             Some(allocated) => { allocated }
         };
 
@@ -230,6 +230,7 @@ impl<'a, T, Z> Future for ReceiverMultFut<'a, T, Z> where Z: Queue<T> {
             match this.receiver.try_recv_mult(&mut allocated) {
                 Ok(msg) => {
                     if msg > 0 {
+                        // println!("Found!");
                         return Poll::Ready(Ok(allocated));
                     }
                 }
@@ -241,6 +242,7 @@ impl<'a, T, Z> Future for ReceiverMultFut<'a, T, Z> where Z: Queue<T> {
                 }
             }
 
+
             match &mut this.listener {
                 None => {
                     this.receiver.inner.awaiting_sending.fetch_add(1, Ordering::Relaxed);
@@ -248,6 +250,7 @@ impl<'a, T, Z> Future for ReceiverMultFut<'a, T, Z> where Z: Queue<T> {
                     this.listener = Some(this.receiver.inner.waiting_sending.listen())
                 }
                 Some(listener) => {
+                    // println!("Sleeping....");
                     match Pin::new(listener).poll(cx) {
                         Poll::Ready(_) => {
                             this.listener = None;
@@ -255,7 +258,12 @@ impl<'a, T, Z> Future for ReceiverMultFut<'a, T, Z> where Z: Queue<T> {
 
                             continue;
                         }
-                        Poll::Pending => { return Poll::Pending; }
+                        Poll::Pending => {
+                            this.allocated = Some(allocated);
+                            // println!("Pending...");
+
+                            return Poll::Pending;
+                        }
                     }
                 }
             }
@@ -265,7 +273,7 @@ impl<'a, T, Z> Future for ReceiverMultFut<'a, T, Z> where Z: Queue<T> {
 
 impl<'a, T, Z> FusedFuture for ReceiverMultFut<'a, T, Z> where Z: Queue<T> {
     fn is_terminated(&self) -> bool {
-        self.receiver.inner.is_dc.load(Ordering::Relaxed) && self.receiver.inner.queue.is_empty()
+        self.receiver.inner.is_closed_recv()
     }
 }
 
@@ -286,7 +294,7 @@ impl<T, Z> Stream for ReceiverMult<T, Z> where Z: Queue<T> + Sync {
             if let Some(vec) = self.allocated.take() {
                 allocated_vec = vec;
             } else {
-                allocated_vec = Vec::with_capacity(self.inner.queue.capacity().unwrap_or(1024));
+                allocated_vec = Vec::with_capacity(self.inner.queue().capacity().unwrap_or(1024));
             }
 
             loop {
@@ -338,7 +346,7 @@ impl<T, Z> futures_core::Stream for ReceiverMult<T, Z> where Z: Queue<T> + Sync 
             if let Some(vec) = self.allocated.take() {
                 allocated_vec = vec;
             } else {
-                allocated_vec = Vec::with_capacity(self.inner.queue.capacity().unwrap_or(1024));
+                allocated_vec = Vec::with_capacity(self.inner.queue().capacity().unwrap_or(1024));
             }
 
             loop {
@@ -375,7 +383,7 @@ impl<T, Z> futures_core::Stream for ReceiverMult<T, Z> where Z: Queue<T> + Sync 
 
 impl<T, Z> FusedStream for ReceiverMult<T, Z> where Z: Queue<T> + Sync {
     fn is_terminated(&self) -> bool {
-        self.inner.is_dc.load(Ordering::Relaxed)
+        self.inner.is_closed_recv()
     }
 }
 
