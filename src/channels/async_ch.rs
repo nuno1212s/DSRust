@@ -250,7 +250,6 @@ impl<'a, T, Z> Future for ReceiverMultFut<'a, T, Z> where Z: Queue<T> {
                     this.listener = Some(this.receiver.inner.waiting_sending.listen())
                 }
                 Some(listener) => {
-                    // println!("Sleeping....");
                     match Pin::new(listener).poll(cx) {
                         Poll::Ready(_) => {
                             this.listener = None;
@@ -260,7 +259,6 @@ impl<'a, T, Z> Future for ReceiverMultFut<'a, T, Z> where Z: Queue<T> {
                         }
                         Poll::Pending => {
                             this.allocated = Some(allocated);
-                            // println!("Pending...");
 
                             return Poll::Pending;
                         }

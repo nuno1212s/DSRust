@@ -1,8 +1,10 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::atomic::Ordering::Relaxed;
+
 use crossbeam_utils::{Backoff, CachePadded};
+use event_listener::Event;
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 enum State {
@@ -101,11 +103,11 @@ impl State {
 /// Initially, the state is free.
 /// Whenever any thread joins a room X, no other thread can enter any other room Y, however any number of
 /// threads can enter the room X.
-/// TODO: Implement a notification system for when we are waiting longer
-/// periods of time
 pub struct Rooms {
     state: CachePadded<AtomicU64>,
     room_count: u32,
+    listeners: CachePadded<AtomicU16>,
+    event: Event,
 }
 
 impl Rooms {
@@ -113,6 +115,8 @@ impl Rooms {
         Self {
             state: CachePadded::new(AtomicU64::new(0)),
             room_count,
+            listeners: CachePadded::new(AtomicU16::new(0)),
+            event: Event::new(),
         }
     }
 
@@ -120,7 +124,7 @@ impl Rooms {
         self.room_count
     }
 
-    fn change_state_blk<F>(&self, apply: F, room: i32, success_ordering: Ordering) where F: Fn(&State, i32) -> State + Copy {
+    async fn change_state_async<F>(&self, apply: F, room: i32, success_ordering: Ordering) where F: Fn(&State, i32) -> State + Copy {
         let backoff = Backoff::new();
 
         let mut x = self.state.load(Ordering::Relaxed);
@@ -130,9 +134,17 @@ impl Rooms {
 
             match state {
                 State::FREE => {}
-                State::OCCUPIED { room_nr, .. } => {
-                    if room_nr != room as u32 {
-                        backoff.snooze();
+                State::OCCUPIED { room_nr, currently_inside } => {
+                    if room_nr != room as u32 && currently_inside > 2 {
+                        if backoff.is_completed() {
+                            self.listeners.fetch_add(1, Ordering::Relaxed);
+
+                            self.event.listen().await;
+
+                            self.listeners.fetch_sub(1, Ordering::SeqCst);
+                        } else {
+                            backoff.snooze();
+                        }
 
                         x = self.state.load(Relaxed);
 
@@ -147,6 +159,67 @@ impl Rooms {
                                                    success_ordering,
                                                    Ordering::Relaxed) {
                 Ok(_state) => {
+                    match new_state {
+                        State::FREE => {
+                            if self.listeners.load(Ordering::Relaxed) > 0 {
+                                self.event.notify_relaxed(usize::MAX);
+                            }
+                        }
+                        State::OCCUPIED { .. } => {}
+                    }
+
+                    break;
+                }
+                Err(state) => {
+                    x = state;
+                }
+            }
+        }
+    }
+
+    fn change_state_blk<F>(&self, apply: F, room: i32, success_ordering: Ordering) where F: Fn(&State, i32) -> State + Copy {
+        let backoff = Backoff::new();
+
+        let mut x = self.state.load(Ordering::Relaxed);
+
+        loop {
+            let state = State::from_stored_state(x);
+
+            match state {
+                State::FREE => {}
+                State::OCCUPIED { room_nr, currently_inside } => {
+                    if room_nr != room as u32 {
+                        if backoff.is_completed() && currently_inside > 2 {
+                            self.listeners.fetch_add(1, Ordering::Relaxed);
+
+                            self.event.listen().wait();
+
+                            self.listeners.fetch_sub(1, Ordering::SeqCst);
+                        } else {
+                            backoff.snooze();
+                        }
+
+                        x = self.state.load(Relaxed);
+
+                        continue;
+                    }
+                }
+            }
+
+            let new_state = apply(&state, room);
+
+            match self.state.compare_exchange_weak(x, new_state.to_stored_state(),
+                                                   success_ordering,
+                                                   Ordering::Relaxed) {
+                Ok(_state) => {
+                    match new_state {
+                        State::FREE => {
+                            if self.listeners.load(Ordering::Relaxed) > 0 {
+                                self.event.notify_relaxed(usize::MAX);
+                            }
+                        }
+                        State::OCCUPIED { .. } => {}
+                    }
                     break;
                 }
                 Err(state) => {
@@ -176,6 +249,14 @@ impl Rooms {
                                                       success_ordering,
                                                       Ordering::Relaxed) {
             Ok(_state) => {
+                match new_state {
+                    State::FREE => {
+                        if self.listeners.load(Ordering::Relaxed) > 0 {
+                            self.event.notify_relaxed(usize::MAX);
+                        }
+                    }
+                    State::OCCUPIED { .. } => {}
+                }
                 Ok(())
             }
             Err(_err) => {
@@ -222,12 +303,20 @@ impl Rooms {
         self.enter_ordered(room, Relaxed)
     }
 
-    pub fn enter_ordered(&self, room: i32, success_ordering: Ordering)-> Result<(), RoomAcquireError> {
+    pub fn enter_ordered(&self, room: i32, success_ordering: Ordering) -> Result<(), RoomAcquireError> {
         if room <= 0 || room > self.room_count() as i32 {
             return Err(RoomAcquireError::NoRoom);
         }
 
         return self.change_state(State::enter, room, success_ordering);
+    }
+
+    pub async fn enter_async(&self, room: i32) -> Result<(), RoomAcquireError> {
+        self.change_state_async(State::enter, room, Ordering::Release)
+    }
+
+    pub async fn enter_async_ordered(&self, room: i32, ordering: Ordering) -> Result<(), RoomAcquireError> {
+        self.change_state_async(State::enter, room, ordering)
     }
 
     pub fn leave(&self, room: i32) -> Result<(), RoomAcquireError> {
@@ -242,6 +331,13 @@ impl Rooms {
         return self.change_state(State::leave, room, success_ordering);
     }
 
+    pub async fn leave_async(&self, room: i32) -> Result<(), RoomAcquireError> {
+        self.change_state_async(State::leave, room, Ordering::Release)
+    }
+
+    pub async fn leave_async_ordered(&self, room: i32, ordering: Ordering) -> Result<(), RoomAcquireError> {
+        self.change_state_async(State::leave, room, ordering)
+    }
 }
 
 #[derive(Debug)]

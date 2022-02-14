@@ -22,6 +22,18 @@ pub trait BQueue<T>: SizableQueue + Sync + Send {
     fn pop_blk(&self) -> T;
 }
 
+#[async_trait]
+pub trait AsyncQueue<T>: SizableQueue + Sync + Send {
+    //Enqueue an element into the tail of the queue asynchronously
+    async fn enqueue_async(&self, elem: T) -> Result<(), QueueError<T>>;
+
+    ///Pop the first element in the queue asynchronously
+    async fn pop_async(&self) -> Option<T>;
+
+    ///Dump all the elements that are in the queue into the given vector asynchronously
+    async fn dump_async(&self, vec: &mut Vec<T>) -> Result<usize, QueueError<T>>;
+}
+
 ///FIFO non blocking queue trait
 pub trait Queue<T>: SizableQueue + Sync + Send {
     ///Attempts to enqueue an element at the tail of the queue

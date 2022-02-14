@@ -13,9 +13,7 @@ pub struct BackoffN {
 
 impl BackoffN {
     pub fn new() -> Self {
-        let rng = Rng::new();
-
-        fastrand::seed(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs());
+        let rng = Rng::with_seed(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs());
 
         Self {
             current_mult: Cell::new(1),
@@ -23,9 +21,13 @@ impl BackoffN {
         }
     }
 
+    pub fn is_complete(&self) -> bool {
+        self.current_mult.get() > YIELD_LIMIT
+    }
+
     #[inline]
     pub fn spin(&self) {
-        let result = self.random_ng.u32(0..(1 <<
+        let result = self.random_ng.u32(0..=(1 <<
             self.current_mult.get().min(SPIN_LIMIT)));
 
         for _ in 0..result {
@@ -43,7 +45,7 @@ impl BackoffN {
             //The same as spin, but here we want the step
             //To go over SPIN_LIMIT, so we can yield when
             //We have been waiting for a while
-            let result = self.random_ng.u32(0..(1 <<
+            let result = self.random_ng.u32(0..=(1 <<
                 self.current_mult.get().min(SPIN_LIMIT)));
 
             for _ in 0..result {
