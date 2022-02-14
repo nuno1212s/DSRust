@@ -3,7 +3,7 @@ use std::cell::Cell;
 use crossbeam_utils::Backoff;
 use parking_lot::{Condvar, Mutex};
 
-use crate::queues::queues::{AsyncQueue, BQueue, Queue, QueueError, SizableQueue};
+use crate::queues::queues::{BQueue, Queue, QueueError, SizableQueue};
 
 struct QueueData<T> {
     array: Cell<Vec<Option<T>>>,
@@ -302,21 +302,6 @@ impl<T> Queue<T> for MQueue<T> where {
 
             return Ok(to_remove);
         }
-    }
-}
-
-#[async_trait]
-impl<T> AsyncQueue<T> for MQueue<T> {
-    async fn enqueue_async(&self, elem: T) -> Result<(), QueueError<T>> {
-        self.enqueue(elem)
-    }
-
-    async fn pop_async(&self) -> Option<T> {
-        self.pop()
-    }
-
-    async fn dump_async(&self, vec: &mut Vec<T>) -> Result<usize, QueueError<T>> {
-        self.dump(vec)
     }
 }
 

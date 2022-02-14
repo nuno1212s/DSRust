@@ -106,7 +106,7 @@ impl State {
 pub struct Rooms {
     state: CachePadded<AtomicU64>,
     room_count: u32,
-    listeners: CachePadded<AtomicU16>,
+    listeners: AtomicU16,
     event: Event,
 }
 
@@ -115,7 +115,7 @@ impl Rooms {
         Self {
             state: CachePadded::new(AtomicU64::new(0)),
             room_count,
-            listeners: CachePadded::new(AtomicU16::new(0)),
+            listeners: AtomicU16::new(0),
             event: Event::new(),
         }
     }
@@ -312,11 +312,17 @@ impl Rooms {
     }
 
     pub async fn enter_async(&self, room: i32) -> Result<(), RoomAcquireError> {
-        self.change_state_async(State::enter, room, Ordering::Release)
+        self.enter_async_ordered(room, Ordering::Acquire).await
     }
 
     pub async fn enter_async_ordered(&self, room: i32, ordering: Ordering) -> Result<(), RoomAcquireError> {
-        self.change_state_async(State::enter, room, ordering)
+        if room <= 0 || room > self.room_count() as i32 {
+            return Err(RoomAcquireError::NoRoom);
+        }
+
+        self.change_state_async(State::enter, room, ordering);
+
+        Ok(())
     }
 
     pub fn leave(&self, room: i32) -> Result<(), RoomAcquireError> {
@@ -332,11 +338,17 @@ impl Rooms {
     }
 
     pub async fn leave_async(&self, room: i32) -> Result<(), RoomAcquireError> {
-        self.change_state_async(State::leave, room, Ordering::Release)
+        self.leave_async_ordered(room, Ordering::Release).await
     }
 
     pub async fn leave_async_ordered(&self, room: i32, ordering: Ordering) -> Result<(), RoomAcquireError> {
-        self.change_state_async(State::leave, room, ordering)
+        if room <= 0 || room > self.room_count() as i32 {
+            return Err(RoomAcquireError::NoRoom);
+        }
+
+        self.change_state_async(State::leave, room, ordering);
+
+        Ok(())
     }
 }
 

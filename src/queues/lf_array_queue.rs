@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
 
 use crossbeam_utils::{Backoff, CachePadded};
 
-use crate::queues::queues::{AsyncQueue, BQueue, Queue, QueueError, SizableQueue};
+use crate::queues::queues::{BQueue, Queue, QueueError, SizableQueue};
 
 struct StorageSlot<T> {
     /// The current sequence.
@@ -335,21 +335,6 @@ impl<T> Queue<T> for LFBQueue<T> where {
 
             return Ok(collected);
         }
-    }
-}
-
-#[async_trait]
-impl<T> AsyncQueue<T> for LFBQueue<T> {
-    async fn enqueue_async(&self, elem: T) -> Result<(), QueueError<T>> {
-        self.enqueue(elem)
-    }
-
-    async fn pop_async(&self) -> Option<T> {
-        self.pop()
-    }
-
-    async fn dump_async(&self, vec: &mut Vec<T>) -> Result<usize, QueueError<T>> {
-        self.dump(vec)
     }
 }
 

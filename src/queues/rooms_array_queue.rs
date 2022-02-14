@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crossbeam_utils::{Backoff, CachePadded};
 
-use crate::queues::queues::{AsyncQueue, BQueue, Queue, QueueError, SizableQueue};
+use crate::queues::queues::{BQueue, Queue, QueueError, SizableQueue};
 use crate::queues::queues::QueueError::MalformedInputVec;
 use crate::utils::memory_access::UnsafeWrapper;
 use crate::utils::rooms::Rooms;
@@ -226,119 +226,6 @@ impl<T> Queue<T> for LFBRArrayQueue<T> {
             self.rooms.leave_blk_ordered(REM_ROOM, Ordering::Relaxed).unwrap();
         }
 
-
-        return Ok(count);
-    }
-}
-
-impl<T> AsyncQueue<T> for LFBRArrayQueue<T> {
-    async fn enqueue_async(&self, elem: T) -> Result<(), QueueError<T>> {
-        if self.is_full.load(Ordering::Relaxed) {
-            return Result::Err(QueueError::QueueFull { 0: elem });
-        }
-
-        self.rooms.enter_async_ordered(ADD_ROOM, Ordering::Acquire).await.unwrap();
-
-        //Claim the spot we want to add to as ours
-        let prev_tail = self.tail.fetch_add(1, Ordering::Relaxed);
-
-        let head = self.head.load(Ordering::Relaxed);
-
-        //We have not exceeded capacity so we can still add the value
-        if prev_tail - head < self.inner_cap() {
-            unsafe {
-                let array_mut = &mut *self.array.get();
-
-                *array_mut.get_mut(prev_tail as usize % self.inner_cap()).unwrap() = Some(elem);
-            }
-
-            //In case the element we have inserted is the last one,
-            //Close the door behind us
-            if (prev_tail - head) + 1 >= self.inner_cap() {
-                self.is_full.store(true, Ordering::Relaxed);
-            }
-
-            //Leave the room using release as we don't want to receive memory updates from other threads
-            //But we do want other threads to receive the updates we have written
-            self.rooms.leave_async_ordered(ADD_ROOM, Ordering::Release)
-                .await.expect("Failed to exit room");
-
-            return Result::Ok(());
-        }
-
-        self.tail.fetch_sub(1, Ordering::Relaxed);
-
-        //Since we have written nothing, we don't have to synchronize our memory with anyone
-        self.rooms.leave_async_ordered(ADD_ROOM, Ordering::Relaxed).await.unwrap();
-
-        Err(QueueError::QueueFull { 0: elem })
-    }
-
-    async fn pop_async(&self) -> Option<T> {
-        let t: T;
-
-        //Acquire the operations performed by other threads before we have entered the room
-        self.rooms.enter_async_ordered(REM_ROOM, Ordering::Acquire).await.unwrap();
-
-        //Claim the spot that we want to remove
-        let prev_head = self.head.fetch_add(1, Ordering::Relaxed);
-
-        if prev_head < self.tail.load(Ordering::Relaxed) {
-            let pos = prev_head % self.inner_cap();
-
-            unsafe {
-                let array_mut = &mut *self.array.get();
-
-                t = array_mut.get_mut(pos).unwrap().take().unwrap();
-            }
-
-            //Register all our changes into other threads
-            self.rooms.leave_async_ordered(REM_ROOM, Ordering::Release).await.unwrap();
-
-            self.is_full.store(false, Ordering::Relaxed);
-
-            Some(t)
-        } else {
-            //The location does not contain an element so we release our hold onto that location
-            self.head.fetch_sub(1, Ordering::Relaxed);
-
-            self.rooms.leave_async_ordered(REM_ROOM, Ordering::Relaxed).await.unwrap();
-
-            None
-        }
-    }
-
-    async fn dump_async(&self, vec: &mut Vec<T>) -> Result<usize, QueueError<T>> {
-        if vec.capacity() < self.inner_cap() {
-            return Err(MalformedInputVec);
-        }
-
-        //Acquire the room
-        self.rooms.enter_async_ordered(REM_ROOM, Ordering::Acquire).await.unwrap();
-
-        //Since we are in a remove room we know the tail is not going to be altered
-        let current_tail = self.tail.load(Ordering::Relaxed);
-
-        let prev_head = self.head.swap(current_tail, Ordering::Relaxed);
-
-        let count = current_tail - prev_head;
-
-        if count > 0 {
-            unsafe {
-                let x = &mut *self.array.get();
-
-                //Move the values into the new vector
-                for pos in prev_head..current_tail {
-                    vec.push(x.get_mut(pos % self.inner_cap()).unwrap().take().unwrap());
-                }
-            }
-
-            self.is_full.store(false, Ordering::Relaxed);
-
-            self.rooms.leave_async_ordered(REM_ROOM, Ordering::Release).await.unwrap();
-        } else {
-            self.rooms.leave_async_ordered(REM_ROOM, Ordering::Relaxed).await.unwrap();
-        }
 
         return Ok(count);
     }
