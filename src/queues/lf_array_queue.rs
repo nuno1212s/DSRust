@@ -4,9 +4,10 @@ use std::sync::atomic;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
 
-use crossbeam_utils::{Backoff, CachePadded};
+use crossbeam_utils::{CachePadded};
 
 use crate::queues::queues::{BQueue, Queue, QueueError, SizableQueue};
+use crate::utils::backoff::BackoffN;
 
 struct StorageSlot<T> {
     /// The current sequence.
@@ -134,7 +135,7 @@ impl<T> SizableQueue for LFBQueue<T> {
 ///Non blocking implementation for ArrayBQueue
 impl<T> Queue<T> for LFBQueue<T> where {
     fn enqueue(&self, elem: T) -> Result<(), QueueError<T>> {
-        let backoff = Backoff::new();
+        let backoff = BackoffN::new();
 
         let mut tail = self.tail.load(Relaxed);
 
@@ -198,7 +199,7 @@ impl<T> Queue<T> for LFBQueue<T> where {
     }
 
     fn pop(&self) -> Option<T> {
-        let backoff = Backoff::new();
+        let backoff = BackoffN::new();
 
         let mut head = self.head.load(Relaxed);
 
@@ -263,7 +264,7 @@ impl<T> Queue<T> for LFBQueue<T> where {
     }
 
     fn dump(&self, vec: &mut Vec<T>) -> Result<usize, QueueError<T>> {
-        let backoff = Backoff::new();
+        let backoff = BackoffN::new();
 
         let mut prev_head = self.head.load(Relaxed);
 
@@ -340,7 +341,7 @@ impl<T> Queue<T> for LFBQueue<T> where {
 
 impl<T> BQueue<T> for LFBQueue<T> {
     fn enqueue_blk(&self, elem: T) {
-        let backoff = Backoff::new();
+        let backoff = BackoffN::new();
 
         'outer: loop {
             let mut tail = self.tail.load(Relaxed);
@@ -409,7 +410,7 @@ impl<T> BQueue<T> for LFBQueue<T> {
     }
 
     fn pop_blk(&self) -> T {
-        let backoff = Backoff::new();
+        let backoff = BackoffN::new();
 
         'outer: loop {
             let mut head = self.head.load(Relaxed);

@@ -1,9 +1,10 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crossbeam_utils::{Backoff, CachePadded};
+use crossbeam_utils::{CachePadded};
 
 use crate::queues::queues::{BQueue, Queue, QueueError, SizableQueue};
 use crate::queues::queues::QueueError::MalformedInputVec;
+use crate::utils::backoff::BackoffN;
 use crate::utils::memory_access::UnsafeWrapper;
 use crate::utils::rooms::Rooms;
 
@@ -233,7 +234,7 @@ impl<T> Queue<T> for LFBRArrayQueue<T> {
 
 impl<T> BQueue<T> for LFBRArrayQueue<T> {
     fn enqueue_blk(&self, elem: T) {
-        let backoff = Backoff::new();
+        let backoff = BackoffN::new();
 
         loop {
             if self.is_full.load(Ordering::Relaxed) {
@@ -285,7 +286,7 @@ impl<T> BQueue<T> for LFBRArrayQueue<T> {
 
     fn pop_blk(&self) -> T {
         let t: T;
-        let backoff = Backoff::new();
+        let backoff = BackoffN::new();
 
         loop {
             self.rooms.enter_blk_ordered(REM_ROOM, Ordering::Acquire).unwrap();

@@ -1,9 +1,9 @@
 use std::cell::Cell;
 
-use crossbeam_utils::Backoff;
 use parking_lot::{Condvar, Mutex};
 
 use crate::queues::queues::{BQueue, Queue, QueueError, SizableQueue};
+use crate::utils::backoff::BackoffN;
 
 struct QueueData<T> {
     array: Cell<Vec<Option<T>>>,
@@ -73,7 +73,7 @@ impl<T> MQueue<T> {
 impl<T> SizableQueue for MQueue<T> {
     fn size(&self) -> usize {
         if self.backoff() {
-            let backoff = Backoff::new();
+            let backoff = BackoffN::new();
 
             loop {
                 let result = self.array.try_lock();
@@ -111,7 +111,7 @@ impl<T> SizableQueue for MQueue<T> {
 impl<T> Queue<T> for MQueue<T> where {
     fn enqueue(&self, elem: T) -> Result<(), QueueError<T>> {
         if self.backoff() {
-            let backoff = Backoff::new();
+            let backoff = BackoffN::new();
 
             loop {
                 let lock_res = self.array.try_lock();
@@ -175,7 +175,7 @@ impl<T> Queue<T> for MQueue<T> where {
 
     fn pop(&self) -> Option<T> {
         if self.backoff() {
-            let backoff = Backoff::new();
+            let backoff = BackoffN::new();
 
             loop {
                 let lock_result = self.array.try_lock();
@@ -238,7 +238,7 @@ impl<T> Queue<T> for MQueue<T> where {
         }
 
         if self.backoff() {
-            let backoff = Backoff::new();
+            let backoff = BackoffN::new();
 
             loop {
                 match self.array.try_lock() {
@@ -308,7 +308,7 @@ impl<T> Queue<T> for MQueue<T> where {
 impl<T> BQueue<T> for MQueue<T> {
     fn enqueue_blk(&self, elem: T) {
         if self.backoff() {
-            let backoff = Backoff::new();
+            let backoff = BackoffN::new();
 
             loop {
                 let lock_res = self.array.try_lock();
@@ -365,7 +365,7 @@ impl<T> BQueue<T> for MQueue<T> {
 
     fn pop_blk(&self) -> T {
         if self.backoff() {
-            let backoff = Backoff::new();
+            let backoff = BackoffN::new();
 
             loop {
                 let lock_result = self.array.try_lock();

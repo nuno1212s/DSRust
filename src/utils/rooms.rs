@@ -3,8 +3,9 @@ use std::fmt::{Display, Formatter};
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::atomic::Ordering::Relaxed;
 
-use crossbeam_utils::{Backoff, CachePadded};
+use crossbeam_utils::{CachePadded};
 use event_listener::Event;
+use crate::utils::backoff::BackoffN;
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 enum State {
@@ -125,7 +126,7 @@ impl Rooms {
     }
 
     async fn change_state_async<F>(&self, apply: F, room: i32, success_ordering: Ordering) where F: Fn(&State, i32) -> State + Copy {
-        let backoff = Backoff::new();
+        let backoff = BackoffN::new();
 
         let mut x = self.state.load(Ordering::Relaxed);
 
@@ -135,8 +136,8 @@ impl Rooms {
             match state {
                 State::FREE => {}
                 State::OCCUPIED { room_nr, currently_inside } => {
-                    if room_nr != room as u32 && currently_inside > 2 {
-                        if backoff.is_completed() {
+                    if room_nr != room as u32 {
+                        if backoff.is_completed() && currently_inside > 2 {
                             self.listeners.fetch_add(1, Ordering::Relaxed);
 
                             self.event.listen().await;
@@ -178,7 +179,7 @@ impl Rooms {
     }
 
     fn change_state_blk<F>(&self, apply: F, room: i32, success_ordering: Ordering) where F: Fn(&State, i32) -> State + Copy {
-        let backoff = Backoff::new();
+        let backoff = BackoffN::new();
 
         let mut x = self.state.load(Ordering::Relaxed);
 

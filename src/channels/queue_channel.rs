@@ -6,13 +6,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{RecvError, SendError, TryRecvError, TrySendError};
 
-use crossbeam_utils::{Backoff, CachePadded};
+use crossbeam_utils::{CachePadded};
 use event_listener::{Event, EventListener};
 
 use crate::queues::lf_array_queue::LFBQueue;
 use crate::queues::mqueue::MQueue;
 use crate::queues::queues::{Queue, QueueError};
 use crate::queues::rooms_array_queue::LFBRArrayQueue;
+use crate::utils::backoff::BackoffN;
 
 ///Inner classes, handle the futures abstractions
 pub struct Sender<T, Z> where
@@ -80,7 +81,7 @@ impl<T, Z> Sender<T, Z> where
     }
 
     pub fn send(&self, mut obj: T) -> Result<(), SendError<T>> {
-        let backoff = Backoff::new();
+        let backoff = BackoffN::new();
 
         loop {
             match self.try_send(obj) {
@@ -132,7 +133,7 @@ impl<T, Z> Sender<T, Z> where
     }
 
     pub async fn send_async(&self, elem: T) -> Result<(), SendError<T>> {
-        let backoff = Backoff::new();
+        let backoff = BackoffN::new();
 
         let mut obj = elem;
 
@@ -234,7 +235,7 @@ impl<T, Z> Receiver<T, Z> where
     }
 
     pub fn recv_blk(&self) -> Result<T, RecvError> {
-        let backoff = Backoff::new();
+        let backoff = BackoffN::new();
 
         loop {
             match self.try_recv() {
@@ -286,7 +287,7 @@ impl<T, Z> Receiver<T, Z> where
     }
 
     pub async fn recv_async_basic(&self) -> Result<T, RecvError> {
-        let backoff = Backoff::new();
+        let backoff = BackoffN::new();
 
         loop {
             match self.try_recv() {
@@ -380,7 +381,7 @@ impl<T, Z> ReceiverMult<T, Z> where Z: Queue<T> {
             return Err(RecvMultError::Disconnected);
         }
 
-        let backoff = Backoff::new();
+        let backoff = BackoffN::new();
 
         loop {
             match self.inner.queue.dump(vec) {
@@ -429,7 +430,7 @@ impl<T, Z> ReceiverMult<T, Z> where Z: Queue<T> {
             return Err(RecvMultError::Disconnected);
         }
 
-        let backoff = Backoff::new();
+        let backoff = BackoffN::new();
 
         loop {
             match self.inner.queue.dump(vec) {
