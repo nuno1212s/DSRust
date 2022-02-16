@@ -21,6 +21,10 @@ impl BackoffN {
         }
     }
 
+    pub fn is_completed(&self) -> bool {
+        self.current_mult.get() > YIELD_LIMIT
+    }
+
     pub fn is_complete(&self) -> bool {
         self.current_mult.get() > YIELD_LIMIT
     }
