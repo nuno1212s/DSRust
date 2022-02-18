@@ -38,6 +38,10 @@ pub trait Queue<T>: SizableQueue + Sync + Send {
     fn dump(&self, vec: &mut Vec<T>) -> Result<usize, QueueError<T>>;
 }
 
+pub trait PartiallyDumpable<T>: SizableQueue + Sync + Send {
+    fn dump_partial(&self, destination: &mut Vec<T>, to_dump: usize) -> Result<usize, QueueError<T>>;
+}
+
 pub enum QueueError<T> where {
     QueueFull(T),
     MalformedInputVec,

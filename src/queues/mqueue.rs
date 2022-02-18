@@ -2,7 +2,7 @@ use std::cell::Cell;
 
 use parking_lot::{Condvar, Mutex};
 
-use crate::queues::queues::{BQueue, Queue, QueueError, SizableQueue};
+use crate::queues::queues::{BQueue, PartiallyDumpable, Queue, QueueError, SizableQueue};
 use crate::utils::backoff::BackoffN;
 
 struct QueueData<T> {
@@ -237,6 +237,16 @@ impl<T> Queue<T> for MQueue<T> where {
             return Err(QueueError::MalformedInputVec);
         }
 
+        self.dump_partial(vec, self.capacity())
+    }
+}
+
+impl<T> PartiallyDumpable<T> for MQueue<T> {
+    fn dump_partial(&self, destination: &mut Vec<T>, to_dump: usize) -> Result<usize, QueueError<T>> {
+        if destination.capacity() < to_dump {
+            return Err(QueueError::MalformedInputVec);
+        }
+
         if self.backoff() {
             let backoff = BackoffN::new();
 
@@ -251,7 +261,7 @@ impl<T> Queue<T> for MQueue<T> where {
 
                         let mut head = lock_guard.head();
 
-                        let to_remove = lock_guard.size;
+                        let to_remove = std::cmp::min(lock_guard.size(), to_dump);
 
                         let mut cur_size = size;
 
@@ -285,7 +295,7 @@ impl<T> Queue<T> for MQueue<T> where {
 
             let mut head = lock_guard.head();
 
-            let to_remove = lock_guard.size();
+            let to_remove = std::cmp::min(lock_guard.size(), to_dump);
             let mut cur_size = size;
 
             for _ in 0..to_remove {
