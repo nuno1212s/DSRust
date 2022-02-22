@@ -266,7 +266,7 @@ impl<T> PartiallyDumpable<T> for MQueue<T> {
                         let mut cur_size = size;
 
                         for _ in 0..to_remove {
-                            vec.push(lock_guard.array().get_mut(head).unwrap().take().unwrap());
+                            destination.push(lock_guard.array().get_mut(head).unwrap().take().unwrap());
 
                             head = (head + 1) % self.capacity();
                             cur_size -= 1;
@@ -299,7 +299,7 @@ impl<T> PartiallyDumpable<T> for MQueue<T> {
             let mut cur_size = size;
 
             for _ in 0..to_remove {
-                vec.push(lock_guard.array().get_mut(head).unwrap().take().unwrap());
+                destination.push(lock_guard.array().get_mut(head).unwrap().take().unwrap());
 
                 head = (head + 1) % self.capacity();
                 cur_size -= 1;

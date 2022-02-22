@@ -39,6 +39,8 @@ pub trait Queue<T>: SizableQueue + Sync + Send {
 }
 
 pub trait PartiallyDumpable<T>: SizableQueue + Sync + Send {
+    ///Dump only a part of the items contained in the queue.
+    /// Returns the result with the amount of items dumped
     fn dump_partial(&self, destination: &mut Vec<T>, to_dump: usize) -> Result<usize, QueueError<T>>;
 }
 
