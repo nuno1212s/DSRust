@@ -9,8 +9,8 @@ use std::task::{Context, Poll};
 use event_listener::EventListener;
 use futures_core::{FusedFuture, FusedStream};
 
-use crate::channels::queue_channel::{Receiver, ReceiverMult, RecvMultError};
-use crate::queues::queues::Queue;
+use crate::channels::queue_channel::{Receiver, ReceiverMult, ReceiverPartialMult, RecvMultError};
+use crate::queues::queues::{PartiallyDumpable, Queue};
 
 #[derive(Clone)]
 enum OwnedOrRef<'a, T> {
@@ -40,10 +40,20 @@ pub struct ReceiverMultFut<'a, T, Z> where Z: Queue<T> {
     allocated: Option<Vec<T>>,
 }
 
+pub struct ReceiverPartialMultFut<'a, T, Z> where Z: PartiallyDumpable<T> + Queue<T>{
+    receiver: OwnedOrRef<'a, ReceiverPartialMult<T, Z>>,
+    listener: Option<EventListener>,
+    allocated: Option<Vec<T>>,
+    max: usize
+}
+
 //We need this because of the allocated variable, as it's a Vec<T> which
 //Requires T to be send. But allocated will always be empty if it's stored
 //in the allocated variable. When it's filled, it will instantly be returned
 unsafe impl<'a, T, Z> Send for ReceiverMultFut<'a, T, Z> where Z: Queue<T> {}
+unsafe impl<'a, T, Z> Sync for ReceiverMultFut<'a, T, Z> where Z: Queue<T> {}
+unsafe impl<'a, T, Z> Send for ReceiverPartialMultFut<'a, T, Z> where Z: PartiallyDumpable<T> + Queue<T>{}
+unsafe impl<'a, T, Z> Sync for ReceiverPartialMultFut<'a, T, Z> where Z: PartiallyDumpable<T> + Queue<T>{}
 
 impl<'a, T, Z> Unpin for ReceiverFut<'a, T, Z> where Z: Queue<T> {}
 
@@ -240,8 +250,10 @@ impl<'a, T, Z> Future for ReceiverMultFut<'a, T, Z> where Z: Queue<T> {
                 Err(RecvMultError::MalformedInputVec) => {
                     return Poll::Ready(Err(RecvMultError::MalformedInputVec));
                 }
+                _ => {
+                    return Poll::Ready(Err(RecvMultError::UnimplementedOperation))
+                }
             }
-
 
             match &mut this.listener {
                 None => {
@@ -275,7 +287,7 @@ impl<'a, T, Z> FusedFuture for ReceiverMultFut<'a, T, Z> where Z: Queue<T> {
     }
 }
 
-impl<T, Z> Stream for ReceiverMult<T, Z> where Z: Queue<T> + Sync {
+impl<'a, T, Z> Stream for ReceiverMultFut<'a, T, Z> where Z: Queue<T> + Sync {
     type Item = Vec<T>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -283,7 +295,7 @@ impl<T, Z> Stream for ReceiverMult<T, Z> where Z: Queue<T> + Sync {
             if let Some(ev_listener) = self.listener.as_mut() {
                 futures_core::ready!(Pin::new(ev_listener).poll(cx));
 
-                self.inner.awaiting_sending.fetch_sub(1, Ordering::Relaxed);
+                self.receiver.inner.awaiting_sending.fetch_sub(1, Ordering::Relaxed);
                 self.listener = Option::None;
             }
 
@@ -292,11 +304,11 @@ impl<T, Z> Stream for ReceiverMult<T, Z> where Z: Queue<T> + Sync {
             if let Some(vec) = self.allocated.take() {
                 allocated_vec = vec;
             } else {
-                allocated_vec = Vec::with_capacity(self.inner.queue().capacity().unwrap_or(1024));
+                allocated_vec = Vec::with_capacity(self.receiver.inner.queue().capacity().unwrap_or(1024));
             }
 
             loop {
-                match self.try_recv_mult(&mut allocated_vec) {
+                match self.receiver.try_recv_mult(&mut allocated_vec) {
                     Ok(msg) => {
                         if msg > 0 {
                             self.listener = None;
@@ -305,8 +317,8 @@ impl<T, Z> Stream for ReceiverMult<T, Z> where Z: Queue<T> + Sync {
                         } else {
                             match self.listener.as_mut() {
                                 None => {
-                                    self.inner.awaiting_sending.fetch_add(1, Ordering::Relaxed);
-                                    self.listener = Some(self.inner.waiting_sending.listen());
+                                    self.receiver.inner.awaiting_sending.fetch_add(1, Ordering::Relaxed);
+                                    self.listener = Some(self.receiver.inner.waiting_sending.listen());
                                 }
                                 Some(_) => { break; }
                             }
@@ -319,6 +331,9 @@ impl<T, Z> Stream for ReceiverMult<T, Z> where Z: Queue<T> + Sync {
                         return Poll::Ready(None);
                     }
                     Err(RecvMultError::MalformedInputVec) => {}
+                    _ => {
+                        return Poll::Ready(None);
+                    }
                 }
             }
 
@@ -327,7 +342,7 @@ impl<T, Z> Stream for ReceiverMult<T, Z> where Z: Queue<T> + Sync {
     }
 }
 
-impl<T, Z> futures_core::Stream for ReceiverMult<T, Z> where Z: Queue<T> + Sync {
+impl<'a, T, Z> futures_core::Stream for ReceiverMultFut<'a, T, Z> where Z: Queue<T> + Sync {
     type Item = Vec<T>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -335,7 +350,7 @@ impl<T, Z> futures_core::Stream for ReceiverMult<T, Z> where Z: Queue<T> + Sync 
             if let Some(ev_listener) = self.listener.as_mut() {
                 futures_core::ready!(Pin::new(ev_listener).poll(cx));
 
-                self.inner.awaiting_sending.fetch_sub(1, Ordering::Relaxed);
+                self.receiver.inner.awaiting_sending.fetch_sub(1, Ordering::Relaxed);
                 self.listener = Option::None;
             }
 
@@ -344,11 +359,11 @@ impl<T, Z> futures_core::Stream for ReceiverMult<T, Z> where Z: Queue<T> + Sync 
             if let Some(vec) = self.allocated.take() {
                 allocated_vec = vec;
             } else {
-                allocated_vec = Vec::with_capacity(self.inner.queue().capacity().unwrap_or(1024));
+                allocated_vec = Vec::with_capacity(self.receiver.inner.queue().capacity().unwrap_or(1024));
             }
 
             loop {
-                match self.try_recv_mult(&mut allocated_vec) {
+                match self.receiver.try_recv_mult(&mut allocated_vec) {
                     Ok(msg) => {
                         if msg > 0 {
                             self.listener = None;
@@ -357,8 +372,8 @@ impl<T, Z> futures_core::Stream for ReceiverMult<T, Z> where Z: Queue<T> + Sync 
                         } else {
                             match self.listener.as_mut() {
                                 None => {
-                                    self.inner.awaiting_sending.fetch_add(1, Ordering::Relaxed);
-                                    self.listener = Some(self.inner.waiting_sending.listen());
+                                    self.receiver.inner.awaiting_sending.fetch_add(1, Ordering::Relaxed);
+                                    self.listener = Some(self.receiver.inner.waiting_sending.listen());
                                 }
                                 Some(_) => { break; }
                             }
@@ -371,6 +386,9 @@ impl<T, Z> futures_core::Stream for ReceiverMult<T, Z> where Z: Queue<T> + Sync 
                         return Poll::Ready(None);
                     }
                     Err(RecvMultError::MalformedInputVec) => {}
+                    _ => {
+                        return Poll::Ready(None);
+                    }
                 }
             }
 
@@ -379,9 +397,95 @@ impl<T, Z> futures_core::Stream for ReceiverMult<T, Z> where Z: Queue<T> + Sync 
     }
 }
 
-impl<T, Z> FusedStream for ReceiverMult<T, Z> where Z: Queue<T> + Sync {
+impl<'a, T, Z> FusedStream for ReceiverMultFut<'a, T, Z> where Z: Queue<T> + Sync {
     fn is_terminated(&self) -> bool {
-        self.inner.is_closed_recv()
+        self.receiver.inner.is_closed_recv()
+    }
+}
+
+///Receive partial dumps from the queue
+impl<T, Z> ReceiverPartialMult<T, Z> where Z: PartiallyDumpable<T> + Queue<T> {
+    pub fn recv_fut(&self, size: usize) -> ReceiverPartialMultFut<'_, T, Z> {
+        ReceiverPartialMultFut {
+            receiver: OwnedOrRef::Ref(self),
+            listener: None,
+            allocated: None,
+            max: size
+        }
+    }
+
+    pub fn into_recv_fut(self, size: usize) -> ReceiverPartialMultFut<'static, T, Z> {
+        ReceiverPartialMultFut {
+            receiver: OwnedOrRef::Owned(self),
+            listener: None,
+            allocated: None,
+            max: size
+        }
+    }
+}
+
+impl<'a, T, Z> Unpin for ReceiverPartialMultFut<'a, T, Z> where Z: PartiallyDumpable<T> + Queue<T> {}
+
+///Multiple future receiver
+impl<'a, T, Z> Future for ReceiverPartialMultFut<'a, T, Z> where Z: PartiallyDumpable<T> + Queue<T>{
+    type Output = Result<Vec<T>, RecvMultError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut this = Pin::new(self);
+
+        let mut allocated = match this.allocated.take() {
+            None => { Vec::with_capacity(this.max) }
+            Some(allocated) => { allocated }
+        };
+
+        loop {
+            match this.receiver.try_recv_mult(&mut allocated, this.max) {
+                Ok(msg) => {
+                    if msg > 0 {
+                        // println!("Found!");
+                        return Poll::Ready(Ok(allocated));
+                    }
+                }
+                Err(RecvMultError::Disconnected) => {
+                    return Poll::Ready(Err(RecvMultError::Disconnected));
+                }
+                Err(RecvMultError::MalformedInputVec) => {
+                    return Poll::Ready(Err(RecvMultError::MalformedInputVec));
+                }
+                _ => {
+                    return Poll::Ready(Err(RecvMultError::UnimplementedOperation))
+                }
+            }
+
+            match &mut this.listener {
+                None => {
+                    this.receiver.inner.awaiting_sending.fetch_add(1, Ordering::Relaxed);
+
+                    this.listener = Some(this.receiver.inner.waiting_sending.listen())
+                }
+                Some(listener) => {
+                    match Pin::new(listener).poll(cx) {
+                        Poll::Ready(_) => {
+                            this.listener = None;
+                            this.receiver.inner.awaiting_sending.fetch_sub(1, Ordering::Relaxed);
+
+                            continue;
+                        }
+                        Poll::Pending => {
+                            this.allocated = Some(allocated);
+
+                            return Poll::Pending;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<'a, T, Z> FusedFuture for ReceiverPartialMultFut<'a, T, Z> where Z: PartiallyDumpable<T> + Queue<T>{
+    fn is_terminated(&self) -> bool {
+        self.receiver.inner.is_closed_recv()
     }
 }
 

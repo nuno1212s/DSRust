@@ -321,7 +321,7 @@ impl Rooms {
             return Err(RoomAcquireError::NoRoom);
         }
 
-        self.change_state_async(State::enter, room, ordering);
+        self.change_state_async(State::enter, room, ordering).await;
 
         Ok(())
     }
@@ -347,7 +347,7 @@ impl Rooms {
             return Err(RoomAcquireError::NoRoom);
         }
 
-        self.change_state_async(State::leave, room, ordering);
+        self.change_state_async(State::leave, room, ordering).await;
 
         Ok(())
     }
