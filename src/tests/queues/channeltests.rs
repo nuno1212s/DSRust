@@ -104,7 +104,8 @@ pub mod channeltests {
         join.join().unwrap();
     }
 
-    fn test_2_channel_async_send<Z>(sender: Sender<Test, Z>, receiver: Receiver<Test, Z>) where Z: Queue<Test> + 'static {
+    fn test_2_channel_async_send<Z>(sender: Sender<Test, Z>, receiver: Receiver<Test, Z>, attempts: usize) where Z: Queue<Test> + 'static {
+
         let sender1 = sender.clone();
 
         let handle = std::thread::spawn(move || {
@@ -116,6 +117,8 @@ pub mod channeltests {
 
             assert_eq!(*result.0, 42);
         });
+
+        sleep(Duration::from_millis(100));
 
         async_std::task::block_on(sender.send_async(Test(Rc::new(42))));
 

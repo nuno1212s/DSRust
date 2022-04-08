@@ -15,7 +15,12 @@ use crate::queues::queues::{PartiallyDumpable, Queue, QueueError};
 use crate::queues::rooms_array_queue::LFBRArrayQueue;
 use crate::utils::backoff::BackoffN;
 
-///Inner classes, handle the futures abstractions
+
+///TODO: VERY IMPORTANT
+/// INVESTIGATE A PROBLEM WHERE PEOPLE THAT ARE RECEIVING SYNC AND HAVE TO WAIT FOR THE MESSAGE
+/// ARE NOT GETTING AWOKEN / ARE NOT GETTING THE MESSAGE CORRECTLY
+/// THIS IS USING RECV_MULT
+
 pub struct Sender<T, Z> where
     Z: Queue<T> {
     inner: Arc<SendingInner<T, Z>>,
@@ -180,7 +185,9 @@ impl<T, Z> Sender<T, Z> where
                     }
                 }
 
+                //println!("Sleeping thread {:?}", std::thread::current().id());
                 self.inner.waiting_reception.listen().await;
+                //println!("Awoken thread {:?}", std::thread::current().id());
             }
 
             self.inner.awaiting_reception.fetch_sub(1, Ordering::Release);
@@ -383,9 +390,7 @@ impl<T, Z> ReceiverMult<T, Z> where Z: Queue<T> {
         loop {
             match self.inner.queue.dump(vec) {
                 Ok(amount) => {
-                    if amount > 0 {
-                        self.notify_if_necessary();
-                    }
+                    self.notify_if_necessary();
 
                     return Ok(amount);
                 }
@@ -640,8 +645,10 @@ impl<T, Z> Clone for ReceiverPartialMult<T, Z> where
     }
 }
 
+///Inner classes, handle the futures abstractions
+
 ///We have this extra abstractions so we can keep
-///Count of how many sending clone there are without
+///Count of how many sending clone there are without actually
 ///having to count them, as when this sending inner
 ///gets disposed of, it means that no other processes
 ///Are listening, so the channel is effectively closed
@@ -715,7 +722,7 @@ pub struct Inner<T, Z> where
     //Is the channel disconnected
     is_dc: AtomicBool,
     //Sleeping event to allow threads that are waiting for a request
-//To go to sleep efficiently
+    //To go to sleep efficiently
     awaiting_reception: CachePadded<AtomicU32>,
     pub(crate) awaiting_sending: CachePadded<AtomicU32>,
     waiting_reception: Event,

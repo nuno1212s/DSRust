@@ -1,13 +1,12 @@
 use std::future::Future;
 use std::ops::Deref;
 use std::pin::Pin;
-use std::stream::Stream;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{RecvError, TryRecvError};
 use std::task::{Context, Poll};
 
 use event_listener::EventListener;
-use futures_core::{FusedFuture, FusedStream};
+use futures_core::{FusedFuture, FusedStream, Stream};
 
 use crate::channels::queue_channel::{Receiver, ReceiverMult, ReceiverPartialMult, RecvMultError};
 use crate::queues::queues::{PartiallyDumpable, Queue};
@@ -159,45 +158,6 @@ impl<T, Z> Stream for Receiver<T, Z> where
     }
 }
 
-impl<T, Z> futures_core::Stream for Receiver<T, Z> where Z: Queue<T> + Sync {
-    type Item = T;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            if let Some(ev_listener) = self.listener.as_mut() {
-                futures_core::ready!(Pin::new(ev_listener).poll(cx));
-
-                self.inner.awaiting_sending.fetch_sub(1, Ordering::Relaxed);
-                self.listener = Option::None;
-            }
-
-            loop {
-                match self.try_recv() {
-                    Ok(msg) => {
-                        self.listener = None;
-
-                        return Poll::Ready(Some(msg));
-                    }
-                    Err(TryRecvError::Disconnected) => {
-                        self.listener = None;
-
-                        return Poll::Ready(None);
-                    }
-                    Err(TryRecvError::Empty) => {
-                        match self.listener.as_mut() {
-                            None => {
-                                self.inner.awaiting_sending.fetch_add(1, Ordering::Relaxed);
-                                self.listener = Some(self.inner.waiting_sending.listen());
-                            }
-                            Some(_) => { break; }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 impl<T, Z> FusedStream for Receiver<T, Z> where Z: Queue<T> + Sync {
     fn is_terminated(&self) -> bool {
         self.inner.is_closed_recv()
@@ -288,61 +248,6 @@ impl<'a, T, Z> FusedFuture for ReceiverMultFut<'a, T, Z> where Z: Queue<T> {
 }
 
 impl<'a, T, Z> Stream for ReceiverMultFut<'a, T, Z> where Z: Queue<T> + Sync {
-    type Item = Vec<T>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            if let Some(ev_listener) = self.listener.as_mut() {
-                futures_core::ready!(Pin::new(ev_listener).poll(cx));
-
-                self.receiver.inner.awaiting_sending.fetch_sub(1, Ordering::Relaxed);
-                self.listener = Option::None;
-            }
-
-            let mut allocated_vec: Vec<T>;
-
-            if let Some(vec) = self.allocated.take() {
-                allocated_vec = vec;
-            } else {
-                allocated_vec = Vec::with_capacity(self.receiver.inner.queue().capacity().unwrap_or(1024));
-            }
-
-            loop {
-                match self.receiver.try_recv_mult(&mut allocated_vec) {
-                    Ok(msg) => {
-                        if msg > 0 {
-                            self.listener = None;
-
-                            return Poll::Ready(Some(allocated_vec));
-                        } else {
-                            match self.listener.as_mut() {
-                                None => {
-                                    self.receiver.inner.awaiting_sending.fetch_add(1, Ordering::Relaxed);
-                                    self.listener = Some(self.receiver.inner.waiting_sending.listen());
-                                }
-                                Some(_) => { break; }
-                            }
-                        }
-                    }
-                    Err(RecvMultError::Disconnected) => {
-                        self.listener = None;
-                        self.allocated = Some(allocated_vec);
-
-                        return Poll::Ready(None);
-                    }
-                    Err(RecvMultError::MalformedInputVec) => {}
-                    _ => {
-                        return Poll::Ready(None);
-                    }
-                }
-            }
-
-            self.allocated = Some(allocated_vec);
-        }
-    }
-}
-
-impl<'a, T, Z> futures_core::Stream for ReceiverMultFut<'a, T, Z> where Z: Queue<T> + Sync {
     type Item = Vec<T>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {

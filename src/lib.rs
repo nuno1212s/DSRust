@@ -1,5 +1,3 @@
-#![feature(async_stream)]
-
 pub mod tests {
     pub mod queues {
         pub mod queuetests;
