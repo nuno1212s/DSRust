@@ -299,6 +299,10 @@ pub mod queue_tests {
 
             count += 1;
         }
+        
+        let i = start.elapsed().as_millis();
+
+        println!("Performed all remove operations in {} millis", i);
     }
 
     #[test]
@@ -378,10 +382,10 @@ pub mod queue_tests {
 
     #[test]
     fn test_mpsc() {
-        let capacity = 1000;
-        let operations = 3200000;
+        let capacity = 10000;
+        let operations = 10000000;
 
-        let producer_threads = 32;
+        let producer_threads = 2;
 
         println!("Testing blocking queues multiple producer single consumer");
 
